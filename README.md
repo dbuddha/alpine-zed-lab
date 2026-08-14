@@ -10,12 +10,15 @@ may be distributed without legal review.
 
 ## Current status
 
-The lab foundation pins Zed `v1.15.0` at
-`e17dc4f9d50db73a458b64dcce50ecd4878b98a3` and establishes source-isolation,
-license, and patch-series checks. The upstream GPUI Metal and Alpine Metal build
-variants are not yet qualified. They remain incomplete until both build from
-clean checkouts and pass the same semantic, visual, accessibility, lifecycle,
-memory, and workload-identity gates.
+The lab pins Zed `v1.15.0` at
+`e17dc4f9d50db73a458b64dcce50ecd4878b98a3` and Alpine at
+`32f2306024ceb03128e592efcb0d1237cad29a41`. It establishes source isolation,
+license checks, immutable trace identity, and reviewed patch-series checks. The
+first GPL adapter decodes the current solid-quad trace slice into a GPUI scene
+and renders it through pinned GPUI Metal. Pull requests and the weekly schedule
+run coverage ratchets and exhaustive adapter mutation testing. Renderer-only
+timing remains disabled until clean offline-shader CI and hardware calibration
+qualify it.
 
 ## Boundaries
 
@@ -23,7 +26,7 @@ memory, and workload-identity gates.
 flowchart LR
     pin["Immutable Zed pin"] --> provision["Ignored .lab/zed checkout"]
     upstream["Upstream patch series"] --> gpui["Zed with GPUI Metal"]
-    alpine["Alpine adapter patch series"] --> alpine_variant["Zed with Alpine Metal"]
+    alpine["Alpine adapter patch series"] --> alpine_variant["Pinned GPUI trace adapter"]
     provision --> gpui
     provision --> alpine_variant
     gpui --> qualify["Matched qualification protocol"]
@@ -53,22 +56,61 @@ Verify that the immutable tag still resolves to the recorded commit:
 scripts/check-pin.sh --network
 ```
 
-Provision the exact detached Zed checkout into ignored storage:
+Provision the exact detached Zed and Alpine checkouts into ignored storage:
 
 ```sh
 scripts/provision-zed.sh
+scripts/provision-alpine.sh
 ```
 
-The command is idempotent for a matching checkout and fails instead of replacing
-an existing mismatched path. Build variants and workload execution arrive through
-later implementation tasks. A passing policy check does not imply renderer
-equivalence or performance superiority.
+The commands are idempotent for matching checkouts and fail instead of replacing
+an existing mismatched path. On an Apple Silicon Mac with the Metal compiler,
+run the untimed correctness comparison with:
+
+```sh
+scripts/run-renderer-equivalence.sh artifacts/local-equivalence
+```
+
+When only Command Line Tools are installed, local development can compile GPUI
+shaders at runtime:
+
+```sh
+ALPINE_ZED_RUNTIME_SHADERS=1 scripts/run-renderer-equivalence.sh artifacts/local-runtime-shaders
+```
+
+Runtime shader mode is supporting evidence only and is marked unqualified in
+the generated manifest. A passing comparison establishes exact pixels only for
+the pinned trace. It does not establish full primitive coverage, lifecycle or
+resource equivalence, application parity, or performance superiority.
+
+To reproduce the source-assurance gates locally, install the pinned
+`cargo-llvm-cov` and `cargo-mutants` versions shown in CI, then run:
+
+```sh
+ALPINE_ZED_RUNTIME_SHADERS=1 \
+ALPINE_ZED_COVERAGE=1 \
+ALPINE_ZED_MUTATION=1 \
+scripts/run-renderer-equivalence.sh artifacts/local-deep-assurance
+```
+
+The coverage gate currently requires at least 95% line coverage and 90%
+function coverage. Mutation succeeds only when every generated adapter mutant
+is caught or cannot compile. These are assertion-strength gates, not substitutes
+for exact readback equivalence.
+
+Hosted CI requires the repository secret `ALPINE_READ_TOKEN`. It must be a
+fine-grained, read-only credential limited to the private `alpine-gpui`
+repository. Hosted Apple Silicon checks run the pinned GPUI Metal result against
+the Alpine CPU oracle. Direct Metal comparison remains a physical-hardware gate
+because Alpine intentionally rejects GitHub's virtual Metal device as a
+supported production target.
 
 ## Authority
 
 - Alpine Capability: <https://github.com/dbuddha/alpine-gpui/issues/28>
 - Lab Requirement: <https://github.com/dbuddha/alpine-gpui/issues/31>
 - Foundation Task: <https://github.com/dbuddha/alpine-gpui/issues/43>
+- GPUI trace Task: <https://github.com/dbuddha/alpine-gpui/issues/61>
 - Pinned research: <https://github.com/dbuddha/alpine-gpui/issues/27>
 - Isolation decision: <https://github.com/dbuddha/alpine-gpui/issues/41>
 - License: [GPL-3.0-or-later](LICENSE)

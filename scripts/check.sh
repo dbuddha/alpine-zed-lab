@@ -9,7 +9,9 @@ for script in scripts/*.sh scripts/lib/*.sh tests/*.sh; do
 done
 
 scripts/check-pin.sh
+scripts/check-alpine-pin.sh
 scripts/check-license-boundary.sh
+scripts/check-adapter-patch.sh
 scripts/check-workflows.sh
 tests/policy.sh
 
