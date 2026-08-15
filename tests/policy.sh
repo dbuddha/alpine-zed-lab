@@ -125,4 +125,24 @@ if scripts/compare-readbacks.sh 8 "$test_dir/cpu.bgra" "$test_dir/alpine.bgra" "
     exit 1
 fi
 
+revision_root="$test_dir/revision-root"
+mkdir -p "$revision_root"
+git -C "$revision_root" init -q
+git -C "$revision_root" config user.email test@example.invalid
+git -C "$revision_root" config user.name 'Alpine policy test'
+printf 'identified\n' > "$revision_root/input.txt"
+git -C "$revision_root" add input.txt
+git -C "$revision_root" commit -q -m 'test: establish revision fixture'
+expected_revision=$(git -C "$revision_root" rev-parse HEAD)
+actual_revision=$(LAB_ROOT="$revision_root" scripts/read-lab-revision.sh)
+[ "$actual_revision" = "$expected_revision" ] || {
+    printf 'clean lab revision did not match its committed fixture\n' >&2
+    exit 1
+}
+printf 'unidentified\n' >> "$revision_root/input.txt"
+if LAB_ROOT="$revision_root" scripts/read-lab-revision.sh >/dev/null 2>&1; then
+    printf 'dirty lab revision fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+
 printf 'policy regression tests passed\n'
