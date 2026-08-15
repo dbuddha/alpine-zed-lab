@@ -67,6 +67,7 @@ done < patches/alpine-metal/series
 git -C "$variant_checkout" diff --check
 zed_toolchain=$(sed -nE 's/^channel = "([^"]+)"$/\1/p' "$variant_checkout/rust-toolchain.toml")
 [ -n "$zed_toolchain" ] || { printf 'pinned Zed checkout lacks a Rust toolchain channel\n' >&2; exit 1; }
+rustup component add rustfmt clippy --toolchain "$zed_toolchain"
 
 shader_mode=offline-metallib
 feature_arguments=
