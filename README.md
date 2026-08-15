@@ -21,6 +21,12 @@ run coverage ratchets and exhaustive adapter mutation testing. Renderer-only
 timing remains disabled until clean offline-shader CI and hardware calibration
 qualify it.
 
+Every accepted qualification manifest records the clean lab revision that
+generated it alongside the exact Zed and Alpine revisions. Runs from a lab
+worktree with tracked, uncommitted changes fail before evidence is emitted.
+Hosted qualification artifacts are retained for 90 days, and repository policy
+fails if that evidence window drifts.
+
 ## Boundaries
 
 ```mermaid

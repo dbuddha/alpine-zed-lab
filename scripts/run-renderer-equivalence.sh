@@ -206,6 +206,7 @@ alpine_toolchain=$(sed -nE 's/^channel = "([^"]+)"$/\1/p' "$repo_root/.lab/alpin
 alpine_rustc=$(rustc "+$alpine_toolchain" --version | tr ' ' '-')
 zed_rustc=$(rustc "+$zed_toolchain" --version | tr ' ' '-')
 generated_at_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+lab_revision=$(scripts/read-lab-revision.sh)
 
 scripts/check-pin.sh
 scripts/check-alpine-pin.sh
@@ -215,6 +216,7 @@ cat > "$manifest_tmp" <<EOF
 schema = "alpine-renderer-equivalence/v1"
 state = "$state"
 comparison_level = "renderer-only"
+lab_revision = "$lab_revision"
 zed_revision = "$zed_commit"
 alpine_revision = "$alpine_commit"
 scene_trace_sha256 = "$scene_trace_sha256"
