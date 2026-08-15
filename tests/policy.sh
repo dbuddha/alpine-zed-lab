@@ -10,6 +10,28 @@ trap 'rm -rf "$test_dir"' EXIT HUP INT TERM
 cp pins/zed.toml "$test_dir/zed.toml"
 PIN_FILE="$test_dir/zed.toml" scripts/check-pin.sh >/dev/null
 
+cp pins/alpine.toml "$test_dir/alpine.toml"
+ALPINE_PIN_FILE="$test_dir/alpine.toml" scripts/check-alpine-pin.sh >/dev/null
+
+sed 's/b1e51a62da7e87a28367973591f235543f1df14b/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
+if ALPINE_PIN_FILE="$test_dir/invalid-alpine-commit.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
+    printf 'invalid Alpine commit fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+
+cp pins/alpine.toml "$test_dir/unknown-alpine-field.toml"
+printf 'unreviewed = "value"\n' >> "$test_dir/unknown-alpine-field.toml"
+if ALPINE_PIN_FILE="$test_dir/unknown-alpine-field.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
+    printf 'unknown Alpine pin field unexpectedly passed\n' >&2
+    exit 1
+fi
+
+sed 's|scene_trace_path = "assurance/qualification/v1/scene.toml"|scene_trace_path = "../scene.toml"|' pins/alpine.toml > "$test_dir/unsafe-alpine-path.toml"
+if ALPINE_PIN_FILE="$test_dir/unsafe-alpine-path.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
+    printf 'unsafe Alpine trace path unexpectedly passed\n' >&2
+    exit 1
+fi
+
 sed 's/e17dc4f9d50db73a458b64dcce50ecd4878b98a3/not-a-sha/' pins/zed.toml > "$test_dir/zed.toml"
 if PIN_FILE="$test_dir/zed.toml" scripts/check-pin.sh >/dev/null 2>&1; then
     printf 'invalid commit fixture unexpectedly passed\n' >&2
@@ -84,6 +106,22 @@ printf 'forbidden\n' > "$boundary_root/artifacts/result.json"
 git -C "$boundary_root" add -f artifacts/result.json
 if LAB_ROOT="$boundary_root" scripts/check-license-boundary.sh >/dev/null 2>&1; then
     printf 'tracked generated artifact fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+
+printf '\000\001\002\003\004\005\006\007' > "$test_dir/cpu.bgra"
+cp "$test_dir/cpu.bgra" "$test_dir/alpine.bgra"
+cp "$test_dir/cpu.bgra" "$test_dir/gpui.bgra"
+scripts/compare-readbacks.sh 8 "$test_dir/cpu.bgra" "$test_dir/alpine.bgra" "$test_dir/gpui.bgra" >/dev/null
+printf '\377' >> "$test_dir/gpui.bgra"
+if scripts/compare-readbacks.sh 8 "$test_dir/cpu.bgra" "$test_dir/alpine.bgra" "$test_dir/gpui.bgra" >/dev/null 2>&1; then
+    printf 'wrong-length GPUI readback unexpectedly passed\n' >&2
+    exit 1
+fi
+cp "$test_dir/cpu.bgra" "$test_dir/gpui.bgra"
+printf '\377' | dd of="$test_dir/gpui.bgra" bs=1 seek=0 conv=notrunc 2>/dev/null
+if scripts/compare-readbacks.sh 8 "$test_dir/cpu.bgra" "$test_dir/alpine.bgra" "$test_dir/gpui.bgra" >/dev/null 2>&1; then
+    printf 'different GPUI pixels unexpectedly passed\n' >&2
     exit 1
 fi
 

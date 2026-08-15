@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,6 +20,8 @@ jobs:
     name: policy
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      alpine_commit: ${{ steps.pins.outputs.alpine_commit }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -25,25 +30,85 @@ jobs:
         run: |
           scripts/check.sh
           scripts/check-pin.sh --network
+      - name: Export validated public revision
+        id: pins
+        run: |
+          alpine_commit=$(sed -nE 's/^commit = "([0-9a-f]{40})"$/\1/p' pins/alpine.toml)
+          test -n "$alpine_commit"
+          echo "alpine_commit=$alpine_commit" >> "$GITHUB_OUTPUT"
 
   provision:
-    name: provision-pinned-zed
+    name: provision-pinned-sources
+    needs: policy
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: dbuddha/alpine-gpui
+          ref: ${{ needs.policy.outputs.alpine_commit }}
+          path: .lab/alpine
+          persist-credentials: false
       - name: Provision and verify a clean detached checkout
         run: |
           scripts/provision-zed.sh
           scripts/check-pin.sh --network
+          scripts/check-alpine-pin.sh
           test -z "$(git -C .lab/zed status --porcelain)"
+          test -z "$(git -C .lab/alpine status --porcelain)"
+
+  gpui-oracle-equivalence:
+    name: gpui-oracle-equivalence
+    needs: policy
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: dbuddha/alpine-gpui
+          ref: ${{ needs.policy.outputs.alpine_commit }}
+          path: .lab/alpine
+          persist-credentials: false
+      - name: Install the optional Metal toolchain when absent
+        run: |
+          if ! xcrun --sdk macosx --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun --sdk macosx --find metal
+          xcrun --sdk macosx --find metallib
+      - name: Install pinned source-assurance tools
+        run: |
+          cargo install --locked cargo-llvm-cov --version 0.8.7
+          cargo install --locked cargo-mutants --version 27.1.0
+      - name: Provision pinned Zed and validate the GPL adapter
+        env:
+          ALPINE_ZED_COVERAGE: "1"
+          ALPINE_ZED_MUTATION: "1"
+        run: |
+          scripts/provision-zed.sh
+          scripts/check.sh
+          scripts/run-renderer-equivalence.sh --adapter-only artifacts/hosted-gpui-oracle
+      - name: Upload untimed renderer evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: gpui-oracle-${{ github.sha }}
+          path: artifacts/hosted-gpui-oracle
+          retention-days: 7
+          if-no-files-found: error
 
   ci-pass:
     name: ci-pass
     if: always()
-    needs: [policy, provision]
+    needs: [policy, provision, gpui-oracle-equivalence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -51,6 +116,8 @@ jobs:
         env:
           POLICY_RESULT: ${{ needs.policy.result }}
           PROVISION_RESULT: ${{ needs.provision.result }}
+          GPUI_ORACLE_RESULT: ${{ needs.gpui-oracle-equivalence.result }}
         run: |
           test "$POLICY_RESULT" = success
           test "$PROVISION_RESULT" = success
+          test "$GPUI_ORACLE_RESULT" = success

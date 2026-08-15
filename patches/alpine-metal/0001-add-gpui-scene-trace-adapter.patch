@@ -1,0 +1,823 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index ccabb0bd88..aad37c1322 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -669,6 +669,16 @@ version = "0.2.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
++[[package]]
++name = "alpine_trace_adapter"
++version = "0.0.0"
++dependencies = [
++ "gpui",
++ "gpui_platform",
++ "serde",
++ "toml 0.8.23",
++]
++
+ [[package]]
+ name = "alsa"
+ version = "0.10.0"
+diff --git a/Cargo.toml b/Cargo.toml
+index b7acc44c89..faae7e4513 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,7 @@
+ [workspace]
+ resolver = "2"
+ members = [
++    "crates/alpine_trace_adapter",
+     "crates/acp_thread",
+     "crates/acp_tools",
+     "crates/action_log",
+diff --git a/crates/alpine_trace_adapter/Cargo.toml b/crates/alpine_trace_adapter/Cargo.toml
+new file mode 100644
+index 0000000000..faf168c68d
+--- /dev/null
++++ b/crates/alpine_trace_adapter/Cargo.toml
+@@ -0,0 +1,19 @@
++[package]
++name = "alpine_trace_adapter"
++version = "0.0.0"
++edition.workspace = true
++publish = false
++license = "GPL-3.0-or-later"
++
++[lints]
++workspace = true
++
++[features]
++default = []
++runtime-shaders = ["gpui_platform/runtime_shaders"]
++
++[dependencies]
++gpui = { workspace = true, features = ["test-support"] }
++gpui_platform = { workspace = true, features = ["test-support"] }
++serde.workspace = true
++toml.workspace = true
+diff --git a/crates/alpine_trace_adapter/src/lib.rs b/crates/alpine_trace_adapter/src/lib.rs
+new file mode 100644
+index 0000000000..a6e8bfc237
+--- /dev/null
++++ b/crates/alpine_trace_adapter/src/lib.rs
+@@ -0,0 +1,714 @@
++//! GPL lab adapter from `alpine-scene-trace/v1` into pinned GPUI scenes.
++
++use std::{fs, io::ErrorKind, path::Path};
++
++use gpui::{ContentMask, DevicePixels, Quad, Rgba, ScaledPixels, Scene, Size, bounds, point, size};
++use serde::Deserialize;
++
++/// Maximum operations accepted by the pinned Alpine trace slice.
++pub const MAX_TRACE_OPERATIONS: usize = 65_536;
++
++const SCHEMA: &str = "alpine-scene-trace/v1";
++const OPERATION: &str = "solid-quad";
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct SceneTrace {
++    schema: String,
++    id: String,
++    workload_hash: String,
++    revision: u64,
++    clear_color: [f32; 4],
++    viewport: Viewport,
++    #[serde(default)]
++    resources: Vec<toml::Value>,
++    clips: Vec<Clip>,
++    operations: Vec<Operation>,
++}
++
++#[derive(Clone, Copy, Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Viewport {
++    width: f32,
++    height: f32,
++    scale_factor: f32,
++    pixel_width: u32,
++    pixel_height: u32,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Clip {
++    id: String,
++    x: f32,
++    y: f32,
++    width: f32,
++    height: f32,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Operation {
++    sequence: u64,
++    kind: String,
++    resource: Option<String>,
++    clip: Option<String>,
++    x: Option<f32>,
++    y: Option<f32>,
++    width: Option<f32>,
++    height: Option<f32>,
++    red: Option<f32>,
++    green: Option<f32>,
++    blue: Option<f32>,
++    alpha: Option<f32>,
++}
++
++/// Immutable identity copied from the validated trace.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct TraceIdentity {
++    id: String,
++    workload_hash: String,
++    revision: u64,
++    pixel_width: u32,
++    pixel_height: u32,
++}
++
++impl TraceIdentity {
++    /// Returns the trace identifier.
++    pub fn id(&self) -> &str {
++        &self.id
++    }
++
++    /// Returns the declared canonical workload hash.
++    pub fn workload_hash(&self) -> &str {
++        &self.workload_hash
++    }
++
++    /// Returns the persisted scene revision.
++    pub const fn revision(&self) -> u64 {
++        self.revision
++    }
++
++    /// Returns the exact physical pixel width.
++    pub const fn pixel_width(&self) -> u32 {
++        self.pixel_width
++    }
++
++    /// Returns the exact physical pixel height.
++    pub const fn pixel_height(&self) -> u32 {
++        self.pixel_height
++    }
++}
++
++/// A validated GPUI scene plus its physical render target and trace identity.
++pub struct DecodedTrace {
++    scene: Scene,
++    size: Size<DevicePixels>,
++    identity: TraceIdentity,
++}
++
++impl DecodedTrace {
++    /// Returns the painter-ordered GPUI scene.
++    pub const fn scene(&self) -> &Scene {
++        &self.scene
++    }
++
++    /// Returns the exact physical render target.
++    pub const fn size(&self) -> Size<DevicePixels> {
++        self.size
++    }
++
++    /// Returns the immutable workload identity.
++    pub const fn identity(&self) -> &TraceIdentity {
++        &self.identity
++    }
++}
++
++/// Parses and validates one trace before constructing a GPUI scene.
++///
++/// The adapter supports only the current solid-quad protocol slice. GPUI's
++/// headless renderer has a fixed opaque-black clear, so any other clear color
++/// fails instead of silently changing the workload.
++pub fn decode_trace(source: &str) -> Result<DecodedTrace, String> {
++    let trace: SceneTrace = toml::from_str(source)
++        .map_err(|error| format!("cannot parse alpine-scene-trace/v1: {error}"))?;
++    validate_identity(&trace)?;
++    let viewport_bounds = validate_viewport(&trace)?;
++    let clip = validate_clip(&trace, viewport_bounds)?;
++    if !trace.resources.is_empty() {
++        return Err("solid-quad trace slice does not support resources".to_owned());
++    }
++    validate_operation_count(trace.operations.len())?;
++
++    let scale = trace.viewport.scale_factor;
++    let scaled_clip = scaled_bounds(viewport_bounds, scale)?;
++    let mut scene = Scene::default();
++    for (expected, operation) in trace.operations.iter().enumerate() {
++        if operation.sequence != expected as u64 {
++            return Err(format!(
++                "scene operation sequence must be contiguous: expected {expected}, got {}",
++                operation.sequence
++            ));
++        }
++        if operation.kind != OPERATION {
++            return Err(format!("unsupported scene operation {}", operation.kind));
++        }
++        if operation.resource.is_some() {
++            return Err(format!(
++                "solid-quad operation {} cannot reference a resource",
++                operation.sequence
++            ));
++        }
++        if operation.clip.as_deref() != Some(clip.id.as_str()) {
++            return Err(format!(
++                "solid-quad operation {} must reference the viewport clip",
++                operation.sequence
++            ));
++        }
++        let raw_bounds = operation_bounds(operation)?;
++        let color = operation_color(operation)?;
++        scene.insert_primitive(Quad {
++            bounds: scaled_bounds(raw_bounds, scale)?,
++            content_mask: ContentMask {
++                bounds: scaled_clip,
++            },
++            background: Rgba {
++                r: color[0],
++                g: color[1],
++                b: color[2],
++                a: color[3],
++            }
++            .into(),
++            ..Quad::default()
++        });
++    }
++    scene.finish();
++
++    Ok(DecodedTrace {
++        scene,
++        size: size(
++            DevicePixels(trace.viewport.pixel_width as i32),
++            DevicePixels(trace.viewport.pixel_height as i32),
++        ),
++        identity: TraceIdentity {
++            id: trace.id,
++            workload_hash: trace.workload_hash,
++            revision: trace.revision,
++            pixel_width: trace.viewport.pixel_width,
++            pixel_height: trace.viewport.pixel_height,
++        },
++    })
++}
++
++/// Renders one validated trace through pinned GPUI Metal into compact BGRA8.
++///
++/// Any prior output is removed before parsing. A rejected trace or native
++/// failure therefore cannot leave stale success evidence at the requested
++/// path.
++pub fn render_trace_file(trace_path: &Path, output_path: &Path) -> Result<TraceIdentity, String> {
++    invalidate_output(output_path)?;
++    let source = fs::read_to_string(trace_path)
++        .map_err(|error| format!("cannot read trace {}: {error}", trace_path.display()))?;
++    let decoded = decode_trace(&source)?;
++    let identity = decoded.identity().clone();
++    let mut renderer = gpui_platform::current_headless_renderer()
++        .ok_or_else(|| "pinned GPUI headless Metal renderer is unavailable".to_owned())?;
++    let image = renderer
++        .render_scene_to_image(decoded.scene(), decoded.size())
++        .map_err(|error| format!("pinned GPUI Metal readback failed: {error:#}"))?;
++    let mut bytes = image.into_raw();
++    let expected_len = usize::try_from(identity.pixel_width())
++        .ok()
++        .and_then(|width| {
++            usize::try_from(identity.pixel_height())
++                .ok()
++                .and_then(|height| width.checked_mul(height))
++        })
++        .and_then(|pixels| pixels.checked_mul(4))
++        .ok_or_else(|| "GPUI readback length overflow".to_owned())?;
++    if bytes.len() != expected_len {
++        return Err(format!(
++            "GPUI readback length mismatch: expected {expected_len}, got {}",
++            bytes.len()
++        ));
++    }
++    for pixel in bytes.chunks_exact_mut(4) {
++        pixel.swap(0, 2);
++    }
++    fs::write(output_path, bytes).map_err(|error| {
++        format!(
++            "cannot write GPUI readback {}: {error}",
++            output_path.display()
++        )
++    })?;
++    Ok(identity)
++}
++
++fn invalidate_output(path: &Path) -> Result<(), String> {
++    match fs::remove_file(path) {
++        Ok(()) => Ok(()),
++        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
++        Err(error) => Err(format!(
++            "cannot invalidate prior GPUI readback {}: {error}",
++            path.display()
++        )),
++    }
++}
++
++fn validate_identity(trace: &SceneTrace) -> Result<(), String> {
++    if trace.schema != SCHEMA {
++        return Err(format!("scene trace schema must be {SCHEMA}"));
++    }
++    if !valid_slug(&trace.id) {
++        return Err("scene trace identifier must be a lowercase slug".to_owned());
++    }
++    if !valid_sha256(&trace.workload_hash) {
++        return Err("scene trace workload hash must be a lowercase SHA-256".to_owned());
++    }
++    if trace.revision == 0 {
++        return Err("scene trace revision must be positive".to_owned());
++    }
++    if trace.clear_color.map(f32::to_bits) != [0.0, 0.0, 0.0, 1.0].map(f32::to_bits) {
++        return Err("GPUI adapter requires the opaque-black headless clear color".to_owned());
++    }
++    Ok(())
++}
++
++fn validate_viewport(trace: &SceneTrace) -> Result<[f32; 4], String> {
++    let viewport = trace.viewport;
++    if !finite_positive(viewport.width)
++        || !finite_positive(viewport.height)
++        || !finite_positive(viewport.scale_factor)
++        || !valid_device_dimension(viewport.pixel_width)
++        || !valid_device_dimension(viewport.pixel_height)
++    {
++        return Err(
++            "scene trace viewport and physical target must be finite and positive".to_owned(),
++        );
++    }
++    if !physical_matches(viewport.width, viewport.scale_factor, viewport.pixel_width)
++        || !physical_matches(
++            viewport.height,
++            viewport.scale_factor,
++            viewport.pixel_height,
++        )
++    {
++        return Err("scene trace physical target disagrees with logical scale".to_owned());
++    }
++    Ok([0.0, 0.0, viewport.width, viewport.height])
++}
++
++fn validate_operation_count(count: usize) -> Result<(), String> {
++    if count == 0 {
++        return Err("scene trace must contain operations".to_owned());
++    }
++    if count > MAX_TRACE_OPERATIONS {
++        return Err("scene trace operation limit exceeded".to_owned());
++    }
++    Ok(())
++}
++
++fn validate_clip(trace: &SceneTrace, viewport: [f32; 4]) -> Result<&Clip, String> {
++    if trace.clips.len() != 1 {
++        return Err("solid-quad trace slice requires exactly one viewport clip".to_owned());
++    }
++    let clip = &trace.clips[0];
++    if !valid_slug(&clip.id) {
++        return Err("viewport clip identifier must be a lowercase slug".to_owned());
++    }
++    if [clip.x, clip.y, clip.width, clip.height].map(f32::to_bits) != viewport.map(f32::to_bits) {
++        return Err("GPUI adapter requires an exact full-viewport clip".to_owned());
++    }
++    Ok(clip)
++}
++
++fn operation_bounds(operation: &Operation) -> Result<[f32; 4], String> {
++    let bounds = [operation.x, operation.y, operation.width, operation.height];
++    let [Some(x), Some(y), Some(width), Some(height)] = bounds else {
++        return Err(format!(
++            "solid-quad operation {} requires complete bounds",
++            operation.sequence
++        ));
++    };
++    if !x.is_finite() || !y.is_finite() || !finite_positive(width) || !finite_positive(height) {
++        return Err(format!(
++            "solid-quad operation {} has invalid bounds",
++            operation.sequence
++        ));
++    }
++    Ok([x, y, width, height])
++}
++
++fn operation_color(operation: &Operation) -> Result<[f32; 4], String> {
++    let color = [
++        operation.red,
++        operation.green,
++        operation.blue,
++        operation.alpha,
++    ];
++    let [Some(red), Some(green), Some(blue), Some(alpha)] = color else {
++        return Err(format!(
++            "solid-quad operation {} requires a complete color",
++            operation.sequence
++        ));
++    };
++    let color = [red, green, blue, alpha];
++    if !color
++        .iter()
++        .all(|channel| channel.is_finite() && (0.0..=1.0).contains(channel))
++    {
++        return Err(format!(
++            "solid-quad operation {} has an invalid color",
++            operation.sequence
++        ));
++    }
++    Ok(color)
++}
++
++fn scaled_bounds(values: [f32; 4], scale: f32) -> Result<gpui::Bounds<ScaledPixels>, String> {
++    let scaled = values.map(|value| value * scale);
++    if !scaled.iter().all(|value| value.is_finite()) {
++        return Err("scaled quad or clip geometry is not finite".to_owned());
++    }
++    Ok(bounds(
++        point(ScaledPixels(scaled[0]), ScaledPixels(scaled[1])),
++        size(ScaledPixels(scaled[2]), ScaledPixels(scaled[3])),
++    ))
++}
++
++fn finite_positive(value: f32) -> bool {
++    value.is_finite() && value > 0.0
++}
++
++fn valid_device_dimension(value: u32) -> bool {
++    value != 0 && value <= i32::MAX as u32
++}
++
++fn physical_matches(logical: f32, scale: f32, pixel: u32) -> bool {
++    let physical = f64::from(logical) * f64::from(scale);
++    let expected = f64::from(pixel);
++    physical.is_finite() && physical >= expected - 0.5 && physical < expected + 0.5
++}
++
++fn valid_slug(value: &str) -> bool {
++    !value.is_empty()
++        && value
++            .bytes()
++            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
++}
++
++fn valid_sha256(value: &str) -> bool {
++    value.len() == 64
++        && value
++            .bytes()
++            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++}
++
++#[cfg(test)]
++mod tests {
++    use std::{fs, path::PathBuf, process};
++
++    use gpui::{Background, Rgba};
++
++    use super::{
++        MAX_TRACE_OPERATIONS, decode_trace, physical_matches, render_trace_file,
++        valid_device_dimension, validate_operation_count,
++    };
++
++    const VALID: &str = r#"
++schema = "alpine-scene-trace/v1"
++id = "solid-quad-editor-surface"
++workload_hash = "3dbf181350ed2283ce9daa427af5d674cebcceb4dada5abf2a1c1e1f5c156bda"
++revision = 7
++clear_color = [0.0, 0.0, 0.0, 1.0]
++
++[viewport]
++width = 4.0
++height = 2.0
++scale_factor = 2.0
++pixel_width = 8
++pixel_height = 4
++
++[[clips]]
++id = "viewport"
++x = 0.0
++y = 0.0
++width = 4.0
++height = 2.0
++
++[[operations]]
++sequence = 0
++kind = "solid-quad"
++clip = "viewport"
++x = 0.0
++y = 0.0
++width = 4.0
++height = 2.0
++red = 0.0
++green = 0.0
++blue = 1.0
++alpha = 1.0
++"#;
++
++    #[test]
++    fn decodes_supported_trace_to_scaled_gpui_scene() {
++        let decoded = decode_trace(VALID).expect("valid trace");
++        assert_eq!(decoded.identity().id(), "solid-quad-editor-surface");
++        assert_eq!(
++            decoded.identity().workload_hash(),
++            "3dbf181350ed2283ce9daa427af5d674cebcceb4dada5abf2a1c1e1f5c156bda"
++        );
++        assert_eq!(decoded.identity().revision(), 7);
++        assert_eq!(decoded.identity().pixel_width(), 8);
++        assert_eq!(decoded.identity().pixel_height(), 4);
++        assert_eq!(decoded.scene().quads.len(), 1);
++        assert_eq!(decoded.scene().quads[0].bounds.origin.x.0, 0.0);
++        assert_eq!(decoded.scene().quads[0].bounds.size.width.0, 8.0);
++        let expected_background: Background = Rgba {
++            r: 0.0,
++            g: 0.0,
++            b: 1.0,
++            a: 1.0,
++        }
++        .into();
++        assert_eq!(decoded.scene().quads[0].background, expected_background);
++    }
++
++    #[test]
++    fn rejects_unknown_protocol_data() {
++        let source = VALID.replace("revision = 7", "revision = 7\nunreviewed = true");
++        let error = decode_trace(&source)
++            .err()
++            .expect("unknown field must fail");
++        assert!(error.contains("unknown field"));
++    }
++
++    #[test]
++    fn rejects_noncontiguous_painter_order() {
++        let source = VALID.replace("sequence = 0", "sequence = 1");
++        let error = decode_trace(&source).err().expect("sequence must fail");
++        assert!(error.contains("expected 0, got 1"));
++    }
++
++    #[test]
++    fn rejects_incompatible_clear_color() {
++        let source = VALID.replace(
++            "clear_color = [0.0, 0.0, 0.0, 1.0]",
++            "clear_color = [1.0, 0.0, 0.0, 1.0]",
++        );
++        let error = decode_trace(&source).err().expect("clear must fail");
++        assert!(error.contains("opaque-black"));
++    }
++
++    #[test]
++    fn rejects_invalid_scale_identity() {
++        let source = VALID.replace("pixel_width = 8", "pixel_width = 7");
++        let error = decode_trace(&source).err().expect("scale must fail");
++        assert!(error.contains("disagrees with logical scale"));
++    }
++
++    #[test]
++    fn rejects_non_viewport_clip() {
++        let source = VALID.replace(
++            "width = 4.0\nheight = 2.0\n\n[[operations]]",
++            "width = 3.0\nheight = 2.0\n\n[[operations]]",
++        );
++        let error = decode_trace(&source).err().expect("clip must fail");
++        assert!(error.contains("full-viewport clip"));
++    }
++
++    #[test]
++    fn rejects_wrong_schema_and_identity() {
++        let wrong_schema = VALID.replace("alpine-scene-trace/v1", "alpine-scene-trace/v2");
++        rejects_with(&wrong_schema, "schema");
++
++        let wrong_id = VALID.replace("solid-quad-editor-surface", "INVALID");
++        rejects_with(&wrong_id, "identifier");
++
++        let wrong_hash = VALID.replace(
++            "3dbf181350ed2283ce9daa427af5d674cebcceb4dada5abf2a1c1e1f5c156bda",
++            "not-a-hash",
++        );
++        rejects_with(&wrong_hash, "SHA-256");
++    }
++
++    #[test]
++    fn rejects_zero_revision_resources_and_empty_operations() {
++        let zero_revision = VALID.replace("revision = 7", "revision = 0");
++        rejects_with(&zero_revision, "positive");
++
++        let with_resource = VALID.replace(
++            "[[clips]]",
++            "[[resources]]\nid = \"resource\"\nkind = \"image\"\ncontent_hash = \"value\"\n\n[[clips]]",
++        );
++        rejects_with(&with_resource, "resources");
++
++        let operations = VALID.find("[[operations]]").expect("operation marker");
++        rejects_with(&VALID[..operations], "operations");
++    }
++
++    #[test]
++    fn rejects_unsupported_or_resource_backed_operation() {
++        let unsupported = VALID.replace("kind = \"solid-quad\"", "kind = \"sprite\"");
++        rejects_with(&unsupported, "unsupported");
++
++        let resource = VALID.replace(
++            "kind = \"solid-quad\"",
++            "kind = \"solid-quad\"\nresource = \"atlas\"",
++        );
++        rejects_with(&resource, "resource");
++    }
++
++    #[test]
++    fn rejects_missing_or_unknown_clip_reference() {
++        let missing = VALID.replace("clip = \"viewport\"\n", "");
++        rejects_with(&missing, "viewport clip");
++
++        let unknown = VALID.replace("clip = \"viewport\"", "clip = \"other\"");
++        rejects_with(&unknown, "viewport clip");
++    }
++
++    #[test]
++    fn rejects_incomplete_and_invalid_quad_payloads() {
++        let incomplete_bounds =
++            VALID.replace("clip = \"viewport\"\nx = 0.0", "clip = \"viewport\"");
++        rejects_with(&incomplete_bounds, "complete bounds");
++
++        let invalid_bounds = VALID.replace(
++            "width = 4.0\nheight = 2.0\nred",
++            "width = 0.0\nheight = 2.0\nred",
++        );
++        rejects_with(&invalid_bounds, "invalid bounds");
++
++        let incomplete_color = VALID.replace("red = 0.0\n", "");
++        rejects_with(&incomplete_color, "complete color");
++
++        let invalid_color = VALID.replace("blue = 1.0", "blue = 1.1");
++        rejects_with(&invalid_color, "invalid color");
++    }
++
++    #[test]
++    fn rejects_non_finite_scaled_geometry() {
++        let source = VALID.replace(
++            "clip = \"viewport\"\nx = 0.0\ny = 0.0",
++            "clip = \"viewport\"\nx = 3.4e38\ny = 0.0",
++        );
++        rejects_with(&source, "not finite");
++    }
++
++    #[test]
++    fn rejects_each_invalid_viewport_dimension() {
++        for source in [
++            VALID.replace("width = 4.0", "width = 0.0"),
++            VALID.replace("height = 2.0", "height = 0.0"),
++            VALID.replace("scale_factor = 2.0", "scale_factor = 0.0"),
++            VALID.replace("pixel_width = 8", "pixel_width = 0"),
++            VALID.replace("pixel_height = 4", "pixel_height = 0"),
++        ] {
++            rejects_with(&source, "finite and positive");
++        }
++    }
++
++    #[test]
++    fn validates_operation_and_device_boundaries() {
++        assert!(validate_operation_count(1).is_ok());
++        assert!(validate_operation_count(MAX_TRACE_OPERATIONS).is_ok());
++        rejects_result(
++            validate_operation_count(MAX_TRACE_OPERATIONS + 1),
++            "limit exceeded",
++        );
++        assert!(!valid_device_dimension(0));
++        assert!(valid_device_dimension(1));
++        assert!(valid_device_dimension(i32::MAX as u32));
++        assert!(!valid_device_dimension(i32::MAX as u32 + 1));
++    }
++
++    #[test]
++    fn rejects_non_finite_origin_and_upper_rounding_edge() {
++        let source = VALID.replace(
++            "clip = \"viewport\"\nx = 0.0\ny = 0.0",
++            "clip = \"viewport\"\nx = nan\ny = 0.0",
++        );
++        rejects_with(&source, "invalid bounds");
++        assert!(physical_matches(1.499, 1.0, 1));
++        assert!(!physical_matches(1.5, 1.0, 1));
++    }
++
++    #[test]
++    fn rejects_full_length_non_hex_workload_hash() {
++        let source = VALID.replace(
++            "3dbf181350ed2283ce9daa427af5d674cebcceb4dada5abf2a1c1e1f5c156bda",
++            "gdbf181350ed2283ce9daa427af5d674cebcceb4dada5abf2a1c1e1f5c156bda",
++        );
++        rejects_with(&source, "SHA-256");
++    }
++
++    #[cfg(target_os = "macos")]
++    #[test]
++    fn renders_exact_compact_bgra_and_identity() {
++        let root = unique_test_path("valid-render");
++        fs::create_dir(&root).expect("create test directory");
++        let trace = root.join("valid.toml");
++        let output = root.join("readback.bgra");
++        fs::write(&trace, VALID).expect("write valid trace");
++
++        let identity = render_trace_file(&trace, &output).expect("render valid trace");
++        assert_eq!(identity.revision(), 7);
++        assert_eq!(identity.pixel_width(), 8);
++        assert_eq!(identity.pixel_height(), 4);
++        let bytes = fs::read(&output).expect("read compact BGRA output");
++        assert_eq!(bytes.len(), 8 * 4 * 4);
++        assert!(bytes.chunks_exact(4).all(|pixel| pixel == [255, 0, 0, 255]));
++
++        fs::remove_file(trace).expect("remove trace fixture");
++        fs::remove_file(output).expect("remove readback fixture");
++        fs::remove_dir(root).expect("remove test directory");
++    }
++
++    #[test]
++    fn refuses_to_treat_invalidation_errors_as_missing_files() {
++        let root = unique_test_path("invalidation-error");
++        fs::create_dir(&root).expect("create test directory");
++        let trace = root.join("valid.toml");
++        let output = root.join("output-directory");
++        fs::write(&trace, VALID).expect("write valid trace");
++        fs::create_dir(&output).expect("create invalid output directory");
++
++        let error = render_trace_file(&trace, &output).expect_err("directory output must fail");
++        assert!(error.contains("cannot invalidate prior GPUI readback"));
++
++        fs::remove_dir(output).expect("remove invalid output directory");
++        fs::remove_file(trace).expect("remove trace fixture");
++        fs::remove_dir(root).expect("remove test directory");
++    }
++
++    #[test]
++    fn rejected_trace_invalidates_prior_output() {
++        let root = unique_test_path("stale-output");
++        fs::create_dir(&root).expect("create test directory");
++        let trace = root.join("invalid.toml");
++        let output = root.join("readback.bgra");
++        fs::write(&trace, "schema = \"unsupported\"\n").expect("write invalid trace");
++        fs::write(&output, b"stale").expect("write stale output");
++
++        let error = render_trace_file(&trace, &output).expect_err("invalid trace must fail");
++        assert!(error.contains("cannot parse") || error.contains("schema"));
++        assert!(!output.exists());
++
++        fs::remove_file(trace).expect("remove trace fixture");
++        fs::remove_dir(root).expect("remove test directory");
++    }
++
++    fn unique_test_path(name: &str) -> PathBuf {
++        std::env::temp_dir().join(format!("alpine-trace-adapter-{}-{name}", process::id()))
++    }
++
++    fn rejects_with(source: &str, expected: &str) {
++        rejects_result(decode_trace(source), expected);
++    }
++
++    fn rejects_result<T>(result: Result<T, String>, expected: &str) {
++        let error = result.err().expect("operation must be rejected");
++        assert!(error.contains(expected), "unexpected error: {error}");
++    }
++}
+diff --git a/crates/alpine_trace_adapter/src/main.rs b/crates/alpine_trace_adapter/src/main.rs
+new file mode 100644
+index 0000000000..5b0a65a43b
+--- /dev/null
++++ b/crates/alpine_trace_adapter/src/main.rs
+@@ -0,0 +1,39 @@
++use std::{env, path::Path, process::ExitCode};
++
++use alpine_trace_adapter::render_trace_file;
++
++fn main() -> ExitCode {
++    match run() {
++        Ok(message) => {
++            println!("{message}");
++            ExitCode::SUCCESS
++        }
++        Err(error) => {
++            eprintln!("GPUI trace adapter error: {error}");
++            ExitCode::FAILURE
++        }
++    }
++}
++
++fn run() -> Result<String, String> {
++    let mut arguments = env::args().skip(1);
++    let trace_path = arguments
++        .next()
++        .ok_or_else(|| "expected TRACE OUTPUT arguments".to_owned())?;
++    let output_path = arguments
++        .next()
++        .ok_or_else(|| "expected TRACE OUTPUT arguments".to_owned())?;
++    if arguments.next().is_some() {
++        return Err("expected exactly TRACE OUTPUT arguments".to_owned());
++    }
++    let identity = render_trace_file(Path::new(&trace_path), Path::new(&output_path))?;
++    Ok(format!(
++        "schema=alpine-zed-gpui-readback/v1 id={} workload_hash={} revision={} width={} height={} format=compact-bgra8 output={}",
++        identity.id(),
++        identity.workload_hash(),
++        identity.revision(),
++        identity.pixel_width(),
++        identity.pixel_height(),
++        output_path
++    ))
++}
