@@ -25,4 +25,13 @@ done
 
 [ "$uses_count" -gt 0 ] || { printf 'no GitHub Actions references found\n' >&2; exit 1; }
 
+gpui_retention=$(awk '
+    /name: gpui-oracle-/ { artifact = 1; next }
+    artifact && /retention-days:/ { print $2; exit }
+' .github/workflows/ci.yml)
+[ "$gpui_retention" = 90 ] || {
+    printf 'GPUI qualification artifacts must be retained for exactly 90 days\n' >&2
+    exit 1
+}
+
 printf 'workflow pin checks passed\n'
