@@ -1,6 +1,6 @@
 schema = "alpine-revision-pin/v1"
 repository = "https://github.com/dbuddha/alpine-gpui.git"
-commit = "32f2306024ceb03128e592efcb0d1237cad29a41"
+commit = "b1e51a62da7e87a28367973591f235543f1df14b"
 visibility = "private-proprietary"
 scene_trace_path = "assurance/qualification/v1/scene.toml"
 scene_trace_sha256 = "c59c1d7d27abfb2bd6327db236c41934f2da34c9b82d25a6522421c1d38dbe8e"

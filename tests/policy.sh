@@ -13,7 +13,7 @@ PIN_FILE="$test_dir/zed.toml" scripts/check-pin.sh >/dev/null
 cp pins/alpine.toml "$test_dir/alpine.toml"
 ALPINE_PIN_FILE="$test_dir/alpine.toml" scripts/check-alpine-pin.sh >/dev/null
 
-sed 's/32f2306024ceb03128e592efcb0d1237cad29a41/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
+sed 's/b1e51a62da7e87a28367973591f235543f1df14b/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
 if ALPINE_PIN_FILE="$test_dir/invalid-alpine-commit.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
     printf 'invalid Alpine commit fixture unexpectedly passed\n' >&2
     exit 1

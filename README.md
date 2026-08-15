@@ -12,7 +12,7 @@ may be distributed without legal review.
 
 The lab pins Zed `v1.15.0` at
 `e17dc4f9d50db73a458b64dcce50ecd4878b98a3` and Alpine at
-`32f2306024ceb03128e592efcb0d1237cad29a41`. It establishes source isolation,
+`b1e51a62da7e87a28367973591f235543f1df14b`. It establishes source isolation,
 license checks, immutable trace identity, and reviewed patch-series checks. The
 first GPL adapter decodes the current solid-quad trace slice into a GPUI scene
 and renders it through pinned GPUI Metal. Pull requests and the weekly schedule
