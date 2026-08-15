@@ -1,12 +1,13 @@
 # Alpine Zed Lab
 
-Alpine Zed Lab is the private GPL-3.0-or-later comparison environment for
+Alpine Zed Lab is the public GPL-3.0-or-later comparison environment for
 qualifying Alpine GPUI against a pinned Zed application workload. It keeps Zed
-source, assets, patches, and generated artifacts outside the proprietary Alpine
-GPUI repository.
+source, assets, patches, and generated artifacts outside the public,
+proprietary Alpine GPUI repository.
 
-This repository is internal-only. No combined Zed and Alpine binary or artifact
-may be distributed without legal review.
+This project does not publish a combined Zed and Alpine binary. Anyone who
+distributes one is responsible for satisfying the applicable GPL and third-party
+license obligations.
 
 ## Current status
 
@@ -98,12 +99,11 @@ function coverage. Mutation succeeds only when every generated adapter mutant
 is caught or cannot compile. These are assertion-strength gates, not substitutes
 for exact readback equivalence.
 
-Hosted CI requires the repository secret `ALPINE_READ_TOKEN`. It must be a
-fine-grained, read-only credential limited to the private `alpine-gpui`
-repository. Hosted Apple Silicon checks run the pinned GPUI Metal result against
-the Alpine CPU oracle. Direct Metal comparison remains a physical-hardware gate
-because Alpine intentionally rejects GitHub's virtual Metal device as a
-supported production target.
+Hosted CI reads the public Alpine revision without a cross-repository secret.
+Hosted Apple Silicon checks run the pinned GPUI Metal result against the Alpine
+CPU oracle. Direct Metal comparison remains a physical-hardware gate because
+Alpine intentionally rejects GitHub's virtual Metal device as a supported
+production target.
 
 ## Authority
 

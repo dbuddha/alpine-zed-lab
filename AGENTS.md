@@ -7,9 +7,9 @@ scope: repository
 
 ## Purpose
 
-This private GPL-3.0-or-later repository qualifies pinned Zed workloads against
+This public GPL-3.0-or-later repository qualifies pinned Zed workloads against
 GPUI Metal and Alpine Metal. It is a non-shipping research and comparison lab,
-not an Alpine source repository or a distributable Zed fork.
+not an Alpine source repository or a maintained Zed distribution.
 
 ## Required context
 

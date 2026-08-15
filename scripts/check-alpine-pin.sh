@@ -43,7 +43,7 @@ actual_keys=$(awk -F '[[:space:]]*=[[:space:]]*' '
 
 [ "$schema" = "alpine-revision-pin/v1" ] || { printf 'unsupported Alpine pin schema: %s\n' "$schema" >&2; exit 1; }
 [ "$repository" = "https://github.com/dbuddha/alpine-gpui.git" ] || { printf 'unexpected Alpine repository: %s\n' "$repository" >&2; exit 1; }
-[ "$visibility" = "private-proprietary" ] || { printf 'unexpected Alpine visibility boundary: %s\n' "$visibility" >&2; exit 1; }
+[ "$visibility" = "public-proprietary" ] || { printf 'unexpected Alpine visibility boundary: %s\n' "$visibility" >&2; exit 1; }
 [ "$scene_trace_path" = "assurance/qualification/v1/scene.toml" ] || { printf 'unexpected Alpine scene trace path: %s\n' "$scene_trace_path" >&2; exit 1; }
 
 case "$scene_trace_path" in /*|*..*|*//*|*\\*) printf 'unsafe Alpine scene trace path: %s\n' "$scene_trace_path" >&2; exit 1 ;; esac
@@ -55,11 +55,19 @@ for value in "$scene_trace_sha256" "$workload_hash"; do
 done
 
 if [ "$network" = true ]; then
-    resolved=$(git ls-remote "$repository" | awk -v expected="$commit" '$1 == expected { print $1; exit }')
-    [ "$resolved" = "$commit" ] || {
-        printf 'Alpine commit %s is not advertised by the private origin\n' "$commit" >&2
+    probe_root=$(mktemp -d /tmp/alpine-pin-check.XXXXXX)
+    trap 'rm -rf "$probe_root"' EXIT HUP INT TERM
+    git -C "$probe_root" init --bare --quiet
+    GIT_TERMINAL_PROMPT=0 git -C "$probe_root" fetch --quiet --depth=1 "$repository" "$commit" || {
+        printf 'Alpine commit %s cannot be fetched from the public origin\n' "$commit" >&2
         exit 1
     }
+    git -C "$probe_root" cat-file -e "$commit^{commit}" || {
+        printf 'Alpine object %s is not a commit\n' "$commit" >&2
+        exit 1
+    }
+    rm -rf "$probe_root"
+    trap - EXIT HUP INT TERM
 fi
 
 if [ -e .lab/alpine ] || [ -L .lab/alpine ]; then

@@ -30,7 +30,7 @@ jobs:
         run: |
           scripts/check.sh
           scripts/check-pin.sh --network
-      - name: Export validated private revision
+      - name: Export validated public revision
         id: pins
         run: |
           alpine_commit=$(sed -nE 's/^commit = "([0-9a-f]{40})"$/\1/p' pins/alpine.toml)
@@ -46,15 +46,10 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - name: Require private Alpine read credential
-        env:
-          ALPINE_READ_TOKEN: ${{ secrets.ALPINE_READ_TOKEN }}
-        run: test -n "$ALPINE_READ_TOKEN"
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           repository: dbuddha/alpine-gpui
           ref: ${{ needs.policy.outputs.alpine_commit }}
-          token: ${{ secrets.ALPINE_READ_TOKEN }}
           path: .lab/alpine
           persist-credentials: false
       - name: Provision and verify a clean detached checkout
@@ -76,15 +71,10 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - name: Require private Alpine read credential
-        env:
-          ALPINE_READ_TOKEN: ${{ secrets.ALPINE_READ_TOKEN }}
-        run: test -n "$ALPINE_READ_TOKEN"
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           repository: dbuddha/alpine-gpui
           ref: ${{ needs.policy.outputs.alpine_commit }}
-          token: ${{ secrets.ALPINE_READ_TOKEN }}
           path: .lab/alpine
           persist-credentials: false
       - name: Install the optional Metal toolchain when absent
