@@ -145,4 +145,14 @@ if LAB_ROOT="$revision_root" scripts/read-lab-revision.sh >/dev/null 2>&1; then
     exit 1
 fi
 
+workflow_root="$test_dir/workflows"
+mkdir -p "$workflow_root"
+cp .github/workflows/*.yml "$workflow_root/"
+sed 's/retention-days: 90/retention-days: 7/' \
+    .github/workflows/ci.yml > "$workflow_root/ci.yml"
+if WORKFLOW_ROOT="$workflow_root" scripts/check-workflows.sh >/dev/null 2>&1; then
+    printf 'short qualification retention fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+
 printf 'policy regression tests passed\n'
