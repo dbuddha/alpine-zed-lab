@@ -58,10 +58,10 @@ index 0000000000..faf168c68d
 +toml.workspace = true
 diff --git a/crates/alpine_trace_adapter/src/lib.rs b/crates/alpine_trace_adapter/src/lib.rs
 new file mode 100644
-index 0000000000..8d07976484
+index 0000000000..6ea1e3de27
 --- /dev/null
 +++ b/crates/alpine_trace_adapter/src/lib.rs
-@@ -0,0 +1,846 @@
+@@ -0,0 +1,866 @@
 +//! GPL lab adapter from `alpine-scene-trace/v1` into pinned GPUI scenes.
 +
 +mod v2;
@@ -607,7 +607,7 @@ index 0000000000..8d07976484
 +
 +    use super::{
 +        MAX_TRACE_OPERATIONS, decode_trace, physical_matches, render_trace_file,
-+        valid_device_dimension, validate_operation_count,
++        valid_device_dimension, validate_operation_count, write_readback,
 +    };
 +
 +    const VALID: &str = r#"
@@ -806,6 +806,7 @@ index 0000000000..8d07976484
 +
 +    #[test]
 +    fn validates_operation_and_device_boundaries() {
++        rejects_result(validate_operation_count(0), "must contain operations");
 +        assert!(validate_operation_count(1).is_ok());
 +        assert!(validate_operation_count(MAX_TRACE_OPERATIONS).is_ok());
 +        rejects_result(
@@ -895,6 +896,25 @@ index 0000000000..8d07976484
 +        fs::remove_dir(root).expect("remove test directory");
 +    }
 +
++    #[test]
++    fn rejects_wrong_length_and_unwritable_readbacks() {
++        let decoded = decode_trace(VALID).expect("valid trace");
++        let root = unique_test_path("readback-errors");
++        fs::create_dir(&root).expect("create test directory");
++        let output_directory = root.join("output-directory");
++        fs::create_dir(&output_directory).expect("create output directory");
++
++        let length_error = write_readback(Vec::new(), decoded.identity(), &root.join("unused"))
++            .expect_err("wrong readback length must fail");
++        assert!(length_error.contains("length mismatch"));
++        let write_error = write_readback(vec![0; 8 * 4 * 4], decoded.identity(), &output_directory)
++            .expect_err("directory write must fail");
++        assert!(write_error.contains("cannot write GPUI readback"));
++
++        fs::remove_dir(output_directory).expect("remove output directory");
++        fs::remove_dir(root).expect("remove test directory");
++    }
++
 +    fn unique_test_path(name: &str) -> PathBuf {
 +        std::env::temp_dir().join(format!("alpine-trace-adapter-{}-{name}", process::id()))
 +    }
@@ -974,10 +994,10 @@ index 0000000000..43323b263f
 +}
 diff --git a/crates/alpine_trace_adapter/src/v2.rs b/crates/alpine_trace_adapter/src/v2.rs
 new file mode 100644
-index 0000000000..f2fbf15662
+index 0000000000..1b23a17c82
 --- /dev/null
 +++ b/crates/alpine_trace_adapter/src/v2.rs
-@@ -0,0 +1,935 @@
+@@ -0,0 +1,964 @@
 +use std::{
 +    borrow::Cow,
 +    collections::{BTreeMap, BTreeSet},
@@ -1669,7 +1689,7 @@ index 0000000000..f2fbf15662
 +
 +#[cfg(test)]
 +mod tests {
-+    use std::borrow::Cow;
++    use std::{borrow::Cow, fs, path::PathBuf, process};
 +
 +    use gpui::{
 +        AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, DevicePixels, PlatformAtlas,
@@ -1677,6 +1697,7 @@ index 0000000000..f2fbf15662
 +    };
 +
 +    use super::{canonical_workload_hash, decode, sha256_hex};
++    use crate::render_trace_file;
 +
 +    struct TestAtlas;
 +
@@ -1721,6 +1742,10 @@ index 0000000000..f2fbf15662
 +        assert_eq!(prepared.identity.schema(), "alpine-scene-trace/v2");
 +        assert_eq!(prepared.identity.pair_id(), Some("code-scroll"));
 +        assert_eq!(prepared.identity.pair_kind(), Some("scroll"));
++        assert_eq!(
++            prepared.identity.pair_sequence_hash(),
++            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
++        );
 +        assert_eq!(prepared.identity.pair_step(), Some(0));
 +        assert_eq!(prepared.identity.pair_steps(), Some(2));
 +        assert_eq!(scene.quads.len(), 1);
@@ -1812,6 +1837,26 @@ index 0000000000..f2fbf15662
 +            )),
 +            "opaque",
 +        );
++    }
++
++    #[cfg(target_os = "macos")]
++    #[test]
++    fn renders_v2_through_public_file_boundary() {
++        let root = unique_test_path("v2-render");
++        fs::create_dir(&root).expect("create test directory");
++        let trace = root.join("trace.toml");
++        let output = root.join("readback.bgra");
++        fs::write(&trace, valid_source()).expect("write trace");
++
++        let rendered = render_trace_file(&trace, &output).expect("render v2 trace");
++        assert_eq!(rendered.identity().schema(), "alpine-scene-trace/v2");
++        assert_eq!(rendered.adaptation().quad_count(), 1);
++        assert_eq!(rendered.adaptation().glyph_count(), 1);
++        assert_eq!(fs::read(&output).expect("read output").len(), 4 * 2 * 4);
++
++        fs::remove_file(trace).expect("remove trace");
++        fs::remove_file(output).expect("remove output");
++        fs::remove_dir(root).expect("remove test directory");
 +    }
 +
 +    fn valid_source() -> String {
@@ -1911,6 +1956,10 @@ index 0000000000..f2fbf15662
 +    fn rejects(source: &str, expected: &str) {
 +        let error = decode(source).err().expect("trace must be rejected");
 +        assert!(error.contains(expected), "unexpected error: {error}");
++    }
++
++    fn unique_test_path(name: &str) -> PathBuf {
++        std::env::temp_dir().join(format!("alpine-trace-adapter-{}-{name}", process::id()))
 +    }
 +}
 diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
