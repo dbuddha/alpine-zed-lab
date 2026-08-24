@@ -13,13 +13,17 @@ license obligations.
 
 The lab pins Zed `v1.15.0` at
 `e17dc4f9d50db73a458b64dcce50ecd4878b98a3` and Alpine at
-`b1e51a62da7e87a28367973591f235543f1df14b`. It establishes source isolation,
-license checks, immutable trace identity, and reviewed patch-series checks. The
-first GPL adapter decodes the current solid-quad trace slice into a GPUI scene
-and renders it through pinned GPUI Metal. Pull requests and the weekly schedule
-run coverage ratchets and exhaustive adapter mutation testing. Renderer-only
-timing remains disabled until clean offline-shader CI and hardware calibration
-qualify it.
+`1b6d16e6ddc120a7670fc225913dad9908dd482c`. It establishes source isolation,
+license checks, an immutable eight-fixture trace manifest, and reviewed
+patch-series checks. The GPL adapter preserves the version 1 solid-quad control
+and independently decodes version 2 clips, quads, one prepared A8 atlas,
+monochrome glyphs, and two-step scroll and resize identities into GPUI scenes.
+It uploads canonical atlas bytes through GPUI's existing atlas and uses an
+explicit test-support clear color, so it performs no font shaping or
+rasterization and adds no synthetic background draw. Pull requests and the
+weekly schedule run coverage ratchets and exhaustive adapter mutation testing.
+Renderer-only timing and memory remain disabled until semantic equivalence,
+offline-shader CI, and hardware calibration qualify them.
 
 Every accepted qualification manifest records the clean lab revision that
 generated it alongside the exact Zed and Alpine revisions. Runs from a lab
@@ -86,9 +90,13 @@ ALPINE_ZED_RUNTIME_SHADERS=1 scripts/run-renderer-equivalence.sh artifacts/local
 ```
 
 Runtime shader mode is supporting evidence only and is marked unqualified in
-the generated manifest. A passing comparison establishes exact pixels only for
-the pinned trace. It does not establish full primitive coverage, lifecycle or
-resource equivalence, application parity, or performance superiority.
+the generated manifests. A passing set establishes CPU-oracle agreement within
+one BGRA8 channel unit for the eight pinned prepared scenes. A full physical run
+also requires Alpine Direct Metal and GPUI Metal to be byte-identical. Every
+fixture retains its CPU, GPUI Metal, and, when physically run, Alpine Direct
+Metal readback plus the observed oracle delta, adaptation counters, and pair
+identity. It does not establish full primitive coverage, lifecycle or resource
+equivalence, application parity, timing, memory, or superiority.
 
 To reproduce the source-assurance gates locally, install the pinned
 `cargo-llvm-cov` and `cargo-mutants` versions shown in CI, then run:
@@ -103,7 +111,7 @@ scripts/run-renderer-equivalence.sh artifacts/local-deep-assurance
 The coverage gate currently requires at least 95% line coverage and 90%
 function coverage. Mutation succeeds only when every generated adapter mutant
 is caught or cannot compile. These are assertion-strength gates, not substitutes
-for exact readback equivalence.
+for bounded oracle and exact Metal-to-Metal readback equivalence.
 
 Hosted CI reads the public Alpine revision without a cross-repository secret.
 Hosted Apple Silicon checks run the pinned GPUI Metal result against the Alpine

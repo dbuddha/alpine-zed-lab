@@ -1,2 +1,1 @@
-# Alpine Metal adapter patches are listed as: <sha256> <relative-path>
-ac02209780da713ae72cd9ea81f9af7d09825dd7934758a2a7d008ebb53c762b patches/alpine-metal/0001-add-gpui-scene-trace-adapter.patch
+82ddb3e5732e00b79b250d88b1a8b631f0c963de2c42d7395faeaff9c6cf1c3a patches/alpine-metal/0001-add-gpui-scene-trace-adapter.patch

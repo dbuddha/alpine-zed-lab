@@ -11,9 +11,10 @@ cp pins/zed.toml "$test_dir/zed.toml"
 PIN_FILE="$test_dir/zed.toml" scripts/check-pin.sh >/dev/null
 
 cp pins/alpine.toml "$test_dir/alpine.toml"
+cp pins/alpine-traces.tsv "$test_dir/alpine-traces.tsv"
 ALPINE_PIN_FILE="$test_dir/alpine.toml" scripts/check-alpine-pin.sh >/dev/null
 
-sed 's/b1e51a62da7e87a28367973591f235543f1df14b/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
+sed 's/1b6d16e6ddc120a7670fc225913dad9908dd482c/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
 if ALPINE_PIN_FILE="$test_dir/invalid-alpine-commit.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
     printf 'invalid Alpine commit fixture unexpectedly passed\n' >&2
     exit 1
@@ -26,9 +27,22 @@ if ALPINE_PIN_FILE="$test_dir/unknown-alpine-field.toml" scripts/check-alpine-pi
     exit 1
 fi
 
-sed 's|scene_trace_path = "assurance/qualification/v1/scene.toml"|scene_trace_path = "../scene.toml"|' pins/alpine.toml > "$test_dir/unsafe-alpine-path.toml"
+sed 's|trace_manifest_path = "pins/alpine-traces.tsv"|trace_manifest_path = "../traces.tsv"|' pins/alpine.toml > "$test_dir/unsafe-alpine-path.toml"
 if ALPINE_PIN_FILE="$test_dir/unsafe-alpine-path.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
-    printf 'unsafe Alpine trace path unexpectedly passed\n' >&2
+    printf 'unsafe Alpine trace manifest path unexpectedly passed\n' >&2
+    exit 1
+fi
+
+cp pins/alpine-traces.tsv "$test_dir/corrupt-alpine-traces.tsv"
+printf 'unreviewed\n' >> "$test_dir/corrupt-alpine-traces.tsv"
+if ALPINE_TRACE_MANIFEST_FILE="$test_dir/corrupt-alpine-traces.tsv" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
+    printf 'corrupt Alpine trace manifest unexpectedly passed\n' >&2
+    exit 1
+fi
+
+sed 's/afa696780de42292510c3b19bd60602149455fd921ceefc3f6e7f0dcf00b67d4/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' pins/alpine.toml > "$test_dir/wrong-alpine-manifest-hash.toml"
+if ALPINE_PIN_FILE="$test_dir/wrong-alpine-manifest-hash.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
+    printf 'wrong Alpine trace manifest fingerprint unexpectedly passed\n' >&2
     exit 1
 fi
 
@@ -122,6 +136,14 @@ cp "$test_dir/cpu.bgra" "$test_dir/gpui.bgra"
 printf '\377' | dd of="$test_dir/gpui.bgra" bs=1 seek=0 conv=notrunc 2>/dev/null
 if scripts/compare-readbacks.sh 8 "$test_dir/cpu.bgra" "$test_dir/alpine.bgra" "$test_dir/gpui.bgra" >/dev/null 2>&1; then
     printf 'different GPUI pixels unexpectedly passed\n' >&2
+    exit 1
+fi
+cp "$test_dir/cpu.bgra" "$test_dir/gpui.bgra"
+printf '\001' | dd of="$test_dir/gpui.bgra" bs=1 seek=0 conv=notrunc 2>/dev/null
+scripts/compare-readbacks.sh --max-channel-delta 1 8 "$test_dir/cpu.bgra" "$test_dir/gpui.bgra" >/dev/null
+printf '\002' | dd of="$test_dir/gpui.bgra" bs=1 seek=0 conv=notrunc 2>/dev/null
+if scripts/compare-readbacks.sh --max-channel-delta 1 8 "$test_dir/cpu.bgra" "$test_dir/gpui.bgra" >/dev/null 2>&1; then
+    printf 'out-of-tolerance GPUI pixels unexpectedly passed\n' >&2
     exit 1
 fi
 

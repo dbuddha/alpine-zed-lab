@@ -58,11 +58,13 @@ index 0000000000..faf168c68d
 +toml.workspace = true
 diff --git a/crates/alpine_trace_adapter/src/lib.rs b/crates/alpine_trace_adapter/src/lib.rs
 new file mode 100644
-index 0000000000..a6e8bfc237
+index 0000000000..6ea1e3de27
 --- /dev/null
 +++ b/crates/alpine_trace_adapter/src/lib.rs
-@@ -0,0 +1,714 @@
+@@ -0,0 +1,866 @@
 +//! GPL lab adapter from `alpine-scene-trace/v1` into pinned GPUI scenes.
++
++mod v2;
 +
 +use std::{fs, io::ErrorKind, path::Path};
 +
@@ -130,14 +132,30 @@ index 0000000000..a6e8bfc237
 +/// Immutable identity copied from the validated trace.
 +#[derive(Clone, Debug, Eq, PartialEq)]
 +pub struct TraceIdentity {
++    schema: String,
 +    id: String,
 +    workload_hash: String,
 +    revision: u64,
 +    pixel_width: u32,
 +    pixel_height: u32,
++    pair: Option<PairIdentity>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct PairIdentity {
++    pub(crate) id: String,
++    pub(crate) kind: String,
++    pub(crate) sequence_hash: String,
++    pub(crate) step: u32,
++    pub(crate) steps: u32,
 +}
 +
 +impl TraceIdentity {
++    /// Returns the trace schema.
++    pub fn schema(&self) -> &str {
++        &self.schema
++    }
++
 +    /// Returns the trace identifier.
 +    pub fn id(&self) -> &str {
 +        &self.id
@@ -161,6 +179,92 @@ index 0000000000..a6e8bfc237
 +    /// Returns the exact physical pixel height.
 +    pub const fn pixel_height(&self) -> u32 {
 +        self.pixel_height
++    }
++
++    /// Returns the pair identifier when this fixture belongs to a sequence.
++    pub fn pair_id(&self) -> Option<&str> {
++        self.pair.as_ref().map(|pair| pair.id.as_str())
++    }
++
++    /// Returns the pair kind when this fixture belongs to a sequence.
++    pub fn pair_kind(&self) -> Option<&str> {
++        self.pair.as_ref().map(|pair| pair.kind.as_str())
++    }
++
++    /// Returns the pair sequence hash when present.
++    pub fn pair_sequence_hash(&self) -> Option<&str> {
++        self.pair.as_ref().map(|pair| pair.sequence_hash.as_str())
++    }
++
++    /// Returns the zero-based pair step when present.
++    pub fn pair_step(&self) -> Option<u32> {
++        self.pair.as_ref().map(|pair| pair.step)
++    }
++
++    /// Returns the pair step count when present.
++    pub fn pair_steps(&self) -> Option<u32> {
++        self.pair.as_ref().map(|pair| pair.steps)
++    }
++}
++
++/// Bounded adaptation evidence kept separate from renderer execution.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct AdaptationReport {
++    pub(crate) clip_count: usize,
++    pub(crate) operation_count: usize,
++    pub(crate) quad_count: usize,
++    pub(crate) glyph_count: usize,
++    pub(crate) resource_count: usize,
++    pub(crate) resource_bytes: usize,
++    pub(crate) atlas_allocations: usize,
++}
++
++impl AdaptationReport {
++    /// Returns the number of declared clips.
++    pub const fn clip_count(self) -> usize {
++        self.clip_count
++    }
++    /// Returns the number of painter operations.
++    pub const fn operation_count(self) -> usize {
++        self.operation_count
++    }
++    /// Returns the number of adapted quads.
++    pub const fn quad_count(self) -> usize {
++        self.quad_count
++    }
++    /// Returns the number of adapted glyph instances.
++    pub const fn glyph_count(self) -> usize {
++        self.glyph_count
++    }
++    /// Returns the number of prepared resources.
++    pub const fn resource_count(self) -> usize {
++        self.resource_count
++    }
++    /// Returns the prepared resource payload bytes.
++    pub const fn resource_bytes(self) -> usize {
++        self.resource_bytes
++    }
++    /// Returns the GPUI atlas allocations performed during adaptation.
++    pub const fn atlas_allocations(self) -> usize {
++        self.atlas_allocations
++    }
++}
++
++/// Result of one GPUI Metal readback with separate adaptation evidence.
++#[derive(Debug)]
++pub struct RenderedTrace {
++    identity: TraceIdentity,
++    adaptation: AdaptationReport,
++}
++
++impl RenderedTrace {
++    /// Returns the trace identity.
++    pub const fn identity(&self) -> &TraceIdentity {
++        &self.identity
++    }
++    /// Returns the separate adaptation evidence.
++    pub const fn adaptation(&self) -> AdaptationReport {
++        self.adaptation
 +    }
 +}
 +
@@ -255,11 +359,13 @@ index 0000000000..a6e8bfc237
 +            DevicePixels(trace.viewport.pixel_height as i32),
 +        ),
 +        identity: TraceIdentity {
++            schema: trace.schema,
 +            id: trace.id,
 +            workload_hash: trace.workload_hash,
 +            revision: trace.revision,
 +            pixel_width: trace.viewport.pixel_width,
 +            pixel_height: trace.viewport.pixel_height,
++            pair: None,
 +        },
 +    })
 +}
@@ -269,10 +375,16 @@ index 0000000000..a6e8bfc237
 +/// Any prior output is removed before parsing. A rejected trace or native
 +/// failure therefore cannot leave stale success evidence at the requested
 +/// path.
-+pub fn render_trace_file(trace_path: &Path, output_path: &Path) -> Result<TraceIdentity, String> {
++pub fn render_trace_file(trace_path: &Path, output_path: &Path) -> Result<RenderedTrace, String> {
 +    invalidate_output(output_path)?;
 +    let source = fs::read_to_string(trace_path)
 +        .map_err(|error| format!("cannot read trace {}: {error}", trace_path.display()))?;
++    if source
++        .lines()
++        .any(|line| line == "schema = \"alpine-scene-trace/v2\"")
++    {
++        return v2::render_source(&source, output_path);
++    }
 +    let decoded = decode_trace(&source)?;
 +    let identity = decoded.identity().clone();
 +    let mut renderer = gpui_platform::current_headless_renderer()
@@ -280,7 +392,26 @@ index 0000000000..a6e8bfc237
 +    let image = renderer
 +        .render_scene_to_image(decoded.scene(), decoded.size())
 +        .map_err(|error| format!("pinned GPUI Metal readback failed: {error:#}"))?;
-+    let mut bytes = image.into_raw();
++    write_readback(image.into_raw(), &identity, output_path)?;
++    Ok(RenderedTrace {
++        identity,
++        adaptation: AdaptationReport {
++            clip_count: 1,
++            operation_count: decoded.scene().quads.len(),
++            quad_count: decoded.scene().quads.len(),
++            glyph_count: 0,
++            resource_count: 0,
++            resource_bytes: 0,
++            atlas_allocations: 0,
++        },
++    })
++}
++
++pub(crate) fn write_readback(
++    mut bytes: Vec<u8>,
++    identity: &TraceIdentity,
++    output_path: &Path,
++) -> Result<(), String> {
 +    let expected_len = usize::try_from(identity.pixel_width())
 +        .ok()
 +        .and_then(|width| {
@@ -305,7 +436,7 @@ index 0000000000..a6e8bfc237
 +            output_path.display()
 +        )
 +    })?;
-+    Ok(identity)
++    Ok(())
 +}
 +
 +fn invalidate_output(path: &Path) -> Result<(), String> {
@@ -476,7 +607,7 @@ index 0000000000..a6e8bfc237
 +
 +    use super::{
 +        MAX_TRACE_OPERATIONS, decode_trace, physical_matches, render_trace_file,
-+        valid_device_dimension, validate_operation_count,
++        valid_device_dimension, validate_operation_count, write_readback,
 +    };
 +
 +    const VALID: &str = r#"
@@ -675,6 +806,7 @@ index 0000000000..a6e8bfc237
 +
 +    #[test]
 +    fn validates_operation_and_device_boundaries() {
++        rejects_result(validate_operation_count(0), "must contain operations");
 +        assert!(validate_operation_count(1).is_ok());
 +        assert!(validate_operation_count(MAX_TRACE_OPERATIONS).is_ok());
 +        rejects_result(
@@ -716,10 +848,11 @@ index 0000000000..a6e8bfc237
 +        let output = root.join("readback.bgra");
 +        fs::write(&trace, VALID).expect("write valid trace");
 +
-+        let identity = render_trace_file(&trace, &output).expect("render valid trace");
-+        assert_eq!(identity.revision(), 7);
-+        assert_eq!(identity.pixel_width(), 8);
-+        assert_eq!(identity.pixel_height(), 4);
++        let rendered = render_trace_file(&trace, &output).expect("render valid trace");
++        assert_eq!(rendered.identity().revision(), 7);
++        assert_eq!(rendered.identity().pixel_width(), 8);
++        assert_eq!(rendered.identity().pixel_height(), 4);
++        assert_eq!(rendered.adaptation().quad_count(), 1);
 +        let bytes = fs::read(&output).expect("read compact BGRA output");
 +        assert_eq!(bytes.len(), 8 * 4 * 4);
 +        assert!(bytes.chunks_exact(4).all(|pixel| pixel == [255, 0, 0, 255]));
@@ -763,6 +896,25 @@ index 0000000000..a6e8bfc237
 +        fs::remove_dir(root).expect("remove test directory");
 +    }
 +
++    #[test]
++    fn rejects_wrong_length_and_unwritable_readbacks() {
++        let decoded = decode_trace(VALID).expect("valid trace");
++        let root = unique_test_path("readback-errors");
++        fs::create_dir(&root).expect("create test directory");
++        let output_directory = root.join("output-directory");
++        fs::create_dir(&output_directory).expect("create output directory");
++
++        let length_error = write_readback(Vec::new(), decoded.identity(), &root.join("unused"))
++            .expect_err("wrong readback length must fail");
++        assert!(length_error.contains("length mismatch"));
++        let write_error = write_readback(vec![0; 8 * 4 * 4], decoded.identity(), &output_directory)
++            .expect_err("directory write must fail");
++        assert!(write_error.contains("cannot write GPUI readback"));
++
++        fs::remove_dir(output_directory).expect("remove output directory");
++        fs::remove_dir(root).expect("remove test directory");
++    }
++
 +    fn unique_test_path(name: &str) -> PathBuf {
 +        std::env::temp_dir().join(format!("alpine-trace-adapter-{}-{name}", process::id()))
 +    }
@@ -778,10 +930,10 @@ index 0000000000..a6e8bfc237
 +}
 diff --git a/crates/alpine_trace_adapter/src/main.rs b/crates/alpine_trace_adapter/src/main.rs
 new file mode 100644
-index 0000000000..5b0a65a43b
+index 0000000000..43323b263f
 --- /dev/null
 +++ b/crates/alpine_trace_adapter/src/main.rs
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,58 @@
 +use std::{env, path::Path, process::ExitCode};
 +
 +use alpine_trace_adapter::render_trace_file;
@@ -810,14 +962,1171 @@ index 0000000000..5b0a65a43b
 +    if arguments.next().is_some() {
 +        return Err("expected exactly TRACE OUTPUT arguments".to_owned());
 +    }
-+    let identity = render_trace_file(Path::new(&trace_path), Path::new(&output_path))?;
++    let rendered = render_trace_file(Path::new(&trace_path), Path::new(&output_path))?;
++    let identity = rendered.identity();
++    let adaptation = rendered.adaptation();
 +    Ok(format!(
-+        "schema=alpine-zed-gpui-readback/v1 id={} workload_hash={} revision={} width={} height={} format=compact-bgra8 output={}",
++        "schema=alpine-zed-gpui-readback/v2 trace_schema={} id={} workload_hash={} revision={} width={} height={} pair_id={} pair_kind={} pair_sequence_hash={} pair_step={} pair_steps={} adaptation_clips={} adaptation_operations={} adaptation_quads={} adaptation_glyphs={} adaptation_resources={} adaptation_resource_bytes={} adaptation_atlas_allocations={} adaptation_timing_performed=false renderer_timing_performed=false format=compact-bgra8 output={}",
++        identity.schema(),
 +        identity.id(),
 +        identity.workload_hash(),
 +        identity.revision(),
 +        identity.pixel_width(),
 +        identity.pixel_height(),
++        identity.pair_id().unwrap_or("none"),
++        identity.pair_kind().unwrap_or("none"),
++        identity.pair_sequence_hash().unwrap_or("none"),
++        identity
++            .pair_step()
++            .map_or_else(|| "none".to_owned(), |step| step.to_string()),
++        identity
++            .pair_steps()
++            .map_or_else(|| "none".to_owned(), |steps| steps.to_string()),
++        adaptation.clip_count(),
++        adaptation.operation_count(),
++        adaptation.quad_count(),
++        adaptation.glyph_count(),
++        adaptation.resource_count(),
++        adaptation.resource_bytes(),
++        adaptation.atlas_allocations(),
 +        output_path
 +    ))
 +}
+diff --git a/crates/alpine_trace_adapter/src/v2.rs b/crates/alpine_trace_adapter/src/v2.rs
+new file mode 100644
+index 0000000000..1b23a17c82
+--- /dev/null
++++ b/crates/alpine_trace_adapter/src/v2.rs
+@@ -0,0 +1,982 @@
++use std::{
++    borrow::Cow,
++    collections::{BTreeMap, BTreeSet},
++    path::Path,
++};
++
++use gpui::{
++    AtlasKey, AtlasTile, ContentMask, DevicePixels, MonochromeSprite, PlatformAtlas, Quad,
++    RenderSvgParams, Rgba, ScaledPixels, Scene, Size, TransformationMatrix, bounds, point, size,
++};
++use serde::Deserialize;
++
++use super::{
++    AdaptationReport, PairIdentity, RenderedTrace, TraceIdentity, valid_device_dimension,
++    valid_sha256, valid_slug, write_readback,
++};
++
++const SCHEMA: &str = "alpine-scene-trace/v2";
++const MAX_CLIPS: usize = 4_096;
++const MAX_OPERATIONS: usize = 65_536;
++const MAX_ATLAS_PIXELS: usize = 16_777_216;
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Trace {
++    schema: String,
++    id: String,
++    workload_hash: String,
++    revision: u64,
++    clear_color: [f32; 4],
++    viewport: Viewport,
++    #[serde(default)]
++    resources: Vec<Resource>,
++    clips: Vec<Clip>,
++    operations: Vec<Operation>,
++    pair: Option<Pair>,
++}
++
++#[derive(Clone, Copy, Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Viewport {
++    width: f32,
++    height: f32,
++    scale_factor: f32,
++    pixel_width: u32,
++    pixel_height: u32,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Resource {
++    id: String,
++    kind: String,
++    content_hash: String,
++    revision: Option<u64>,
++    width: Option<u32>,
++    height: Option<u32>,
++    pixels: Option<Vec<u8>>,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Clip {
++    id: String,
++    x: f32,
++    y: f32,
++    width: f32,
++    height: f32,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Operation {
++    sequence: u64,
++    kind: String,
++    resource: Option<String>,
++    clip: Option<String>,
++    x: Option<f32>,
++    y: Option<f32>,
++    width: Option<f32>,
++    height: Option<f32>,
++    red: Option<f32>,
++    green: Option<f32>,
++    blue: Option<f32>,
++    alpha: Option<f32>,
++    atlas_x: Option<u32>,
++    atlas_y: Option<u32>,
++    atlas_width: Option<u32>,
++    atlas_height: Option<u32>,
++}
++
++#[derive(Clone, Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Pair {
++    id: String,
++    kind: String,
++    sequence_hash: String,
++    step: u32,
++    steps: u32,
++}
++
++pub(super) fn render_source(source: &str, output_path: &Path) -> Result<RenderedTrace, String> {
++    let prepared = decode(source)?;
++    let mut renderer = gpui_platform::current_headless_renderer()
++        .ok_or_else(|| "pinned GPUI headless Metal renderer is unavailable".to_owned())?;
++    let (scene, adaptation) = prepared.build_scene(renderer.sprite_atlas().as_ref())?;
++    let image = renderer
++        .render_scene_to_image_with_clear(&scene, prepared.size, prepared.clear_color())
++        .map_err(|error| format!("pinned GPUI Metal readback failed: {error:#}"))?;
++    write_readback(image.into_raw(), &prepared.identity, output_path)?;
++    Ok(RenderedTrace {
++        identity: prepared.identity,
++        adaptation,
++    })
++}
++
++struct PreparedTrace {
++    trace: Trace,
++    size: Size<DevicePixels>,
++    identity: TraceIdentity,
++}
++
++impl PreparedTrace {
++    fn clear_color(&self) -> Rgba {
++        let [r, g, b, a] = self.trace.clear_color;
++        Rgba { r, g, b, a }
++    }
++
++    fn build_scene(&self, atlas: &dyn PlatformAtlas) -> Result<(Scene, AdaptationReport), String> {
++        let scale = self.trace.viewport.scale_factor;
++        let viewport = scaled_bounds(
++            [
++                0.0,
++                0.0,
++                self.trace.viewport.width,
++                self.trace.viewport.height,
++            ],
++            scale,
++        )?;
++        let clips = self
++            .trace
++            .clips
++            .iter()
++            .map(|clip| {
++                scaled_bounds([clip.x, clip.y, clip.width, clip.height], scale)
++                    .map(|bounds| (clip.id.as_str(), bounds))
++            })
++            .collect::<Result<BTreeMap<_, _>, _>>()?;
++
++        let (atlas_resource, atlas_tile, atlas_allocations) =
++            if let Some(resource) = self.trace.resources.first() {
++                let width = resource.width.expect("validated resource width");
++                let height = resource.height.expect("validated resource height");
++                let pixels = resource.pixels.as_ref().expect("validated resource pixels");
++                let atlas_size = size(DevicePixels(width as i32), DevicePixels(height as i32));
++                let key = AtlasKey::Svg(RenderSvgParams {
++                    path: format!("alpine-prepared-a8/{}", resource.content_hash).into(),
++                    size: atlas_size,
++                });
++                let mut allocated = false;
++                let mut build = || {
++                    allocated = true;
++                    Ok(Some((atlas_size, Cow::Borrowed(pixels.as_slice()))))
++                };
++                let tile = atlas
++                    .get_or_insert_with(&key, &mut build)
++                    .map_err(|error| format!("GPUI atlas admission failed: {error:#}"))?
++                    .ok_or_else(|| "GPUI atlas rejected the prepared A8 resource".to_owned())?;
++                (Some(resource), Some(tile), if allocated { 1 } else { 0 })
++            } else {
++                (None, None, 0)
++            };
++
++        let mut scene = Scene::default();
++        let mut quad_count = 0;
++        let mut glyph_count = 0;
++        for operation in &self.trace.operations {
++            let clip = operation
++                .clip
++                .as_deref()
++                .map(|id| clips.get(id).copied().expect("validated clip reference"))
++                .unwrap_or(viewport);
++            let destination = scaled_bounds(operation_bounds(operation)?, scale)?;
++            let [r, g, b, a] = operation_color(operation)?;
++            let color = Rgba { r, g, b, a };
++            match operation.kind.as_str() {
++                "solid-quad" => {
++                    scene.insert_primitive(Quad {
++                        bounds: destination,
++                        content_mask: ContentMask { bounds: clip },
++                        background: color.into(),
++                        ..Quad::default()
++                    });
++                    quad_count += 1;
++                }
++                "monochrome-glyph" => {
++                    let resource = atlas_resource.expect("validated glyph resource");
++                    let base_tile = atlas_tile.expect("validated glyph atlas tile");
++                    let [x, y, width, height] = operation_atlas_bounds(operation, resource)?;
++                    let tile = AtlasTile {
++                        bounds: bounds(
++                            point(
++                                DevicePixels(base_tile.bounds.origin.x.0 + x as i32),
++                                DevicePixels(base_tile.bounds.origin.y.0 + y as i32),
++                            ),
++                            size(DevicePixels(width as i32), DevicePixels(height as i32)),
++                        ),
++                        ..base_tile
++                    };
++                    scene.insert_primitive(MonochromeSprite {
++                        order: 0,
++                        pad: 0,
++                        bounds: destination,
++                        content_mask: ContentMask { bounds: clip },
++                        color: color.into(),
++                        tile,
++                        transformation: TransformationMatrix::unit(),
++                    });
++                    glyph_count += 1;
++                }
++                _ => unreachable!("operation kind validated before scene construction"),
++            }
++        }
++        scene.finish();
++        let resource_bytes = self
++            .trace
++            .resources
++            .iter()
++            .map(|resource| resource.pixels.as_ref().map_or(0, Vec::len))
++            .sum();
++        Ok((
++            scene,
++            AdaptationReport {
++                clip_count: self.trace.clips.len(),
++                operation_count: self.trace.operations.len(),
++                quad_count,
++                glyph_count,
++                resource_count: self.trace.resources.len(),
++                resource_bytes,
++                atlas_allocations,
++            },
++        ))
++    }
++}
++
++fn decode(source: &str) -> Result<PreparedTrace, String> {
++    let trace: Trace = toml::from_str(source)
++        .map_err(|error| format!("cannot parse alpine-scene-trace/v2: {error}"))?;
++    validate(source, &trace)?;
++    let pair = trace.pair.as_ref().map(|pair| PairIdentity {
++        id: pair.id.clone(),
++        kind: pair.kind.clone(),
++        sequence_hash: pair.sequence_hash.clone(),
++        step: pair.step,
++        steps: pair.steps,
++    });
++    let identity = TraceIdentity {
++        schema: trace.schema.clone(),
++        id: trace.id.clone(),
++        workload_hash: trace.workload_hash.clone(),
++        revision: trace.revision,
++        pixel_width: trace.viewport.pixel_width,
++        pixel_height: trace.viewport.pixel_height,
++        pair,
++    };
++    let size = size(
++        DevicePixels(trace.viewport.pixel_width as i32),
++        DevicePixels(trace.viewport.pixel_height as i32),
++    );
++    Ok(PreparedTrace {
++        trace,
++        size,
++        identity,
++    })
++}
++
++fn validate(source: &str, trace: &Trace) -> Result<(), String> {
++    if trace.schema != SCHEMA {
++        return Err(format!("scene trace schema must be {SCHEMA}"));
++    }
++    if !valid_slug(&trace.id) || trace.revision == 0 {
++        return Err("scene trace identity or revision is invalid".to_owned());
++    }
++    if !valid_sha256(&trace.workload_hash)
++        || canonical_workload_hash(source)? != trace.workload_hash
++    {
++        return Err("scene trace canonical workload hash mismatch".to_owned());
++    }
++    if !trace
++        .clear_color
++        .iter()
++        .all(|channel| channel.is_finite() && (0.0..=1.0).contains(channel))
++        || trace.clear_color[3].to_bits() != 1.0_f32.to_bits()
++    {
++        return Err("prepared scene requires a normalized opaque clear color".to_owned());
++    }
++    validate_viewport(trace.viewport)?;
++    let clips = validate_clips(&trace.clips)?;
++    let resources = validate_resources(&trace.resources)?;
++    validate_pair(trace.pair.as_ref())?;
++    if trace.operations.is_empty() || trace.operations.len() > MAX_OPERATIONS {
++        return Err("prepared scene operation count is invalid".to_owned());
++    }
++    for (expected, operation) in trace.operations.iter().enumerate() {
++        if operation.sequence != expected as u64 {
++            return Err(format!(
++                "scene operation sequence must be contiguous: expected {expected}, got {}",
++                operation.sequence
++            ));
++        }
++        validate_operation(operation, &clips, &resources)?;
++    }
++    Ok(())
++}
++
++fn validate_viewport(viewport: Viewport) -> Result<(), String> {
++    if !finite_positive(viewport.width)
++        || !finite_positive(viewport.height)
++        || !finite_positive(viewport.scale_factor)
++        || !valid_device_dimension(viewport.pixel_width)
++        || !valid_device_dimension(viewport.pixel_height)
++    {
++        return Err("prepared scene viewport must be finite and positive".to_owned());
++    }
++    if !physical_matches(viewport.width, viewport.scale_factor, viewport.pixel_width)
++        || !physical_matches(
++            viewport.height,
++            viewport.scale_factor,
++            viewport.pixel_height,
++        )
++    {
++        return Err("prepared scene physical target disagrees with logical scale".to_owned());
++    }
++    Ok(())
++}
++
++fn validate_clips(clips: &[Clip]) -> Result<BTreeSet<&str>, String> {
++    if clips.len() > MAX_CLIPS {
++        return Err("prepared scene clip limit exceeded".to_owned());
++    }
++    let mut ids = BTreeSet::new();
++    for clip in clips {
++        if !valid_slug(&clip.id) || !ids.insert(clip.id.as_str()) {
++            return Err("prepared clip identifier is invalid or duplicated".to_owned());
++        }
++        if !clip.x.is_finite()
++            || !clip.y.is_finite()
++            || !finite_positive(clip.width)
++            || !finite_positive(clip.height)
++        {
++            return Err("prepared clip geometry is invalid".to_owned());
++        }
++    }
++    Ok(ids)
++}
++
++fn validate_resources(resources: &[Resource]) -> Result<BTreeMap<&str, &Resource>, String> {
++    if resources.len() > 1 {
++        return Err("prepared scene supports at most one A8 atlas resource".to_owned());
++    }
++    let mut by_id = BTreeMap::new();
++    for resource in resources {
++        if !valid_slug(&resource.id) || by_id.contains_key(resource.id.as_str()) {
++            return Err("prepared resource identifier is invalid or duplicated".to_owned());
++        }
++        if resource.kind != "a8-atlas" || !valid_sha256(&resource.content_hash) {
++            return Err("prepared resource kind or content hash is invalid".to_owned());
++        }
++        let (Some(revision), Some(width), Some(height), Some(pixels)) = (
++            resource.revision,
++            resource.width,
++            resource.height,
++            resource.pixels.as_ref(),
++        ) else {
++            return Err("prepared A8 atlas fields are incomplete".to_owned());
++        };
++        if revision == 0 || !valid_device_dimension(width) || !valid_device_dimension(height) {
++            return Err("prepared A8 atlas identity or dimensions are invalid".to_owned());
++        }
++        let expected = usize::try_from(width)
++            .ok()
++            .and_then(|width| {
++                usize::try_from(height)
++                    .ok()
++                    .and_then(|height| width.checked_mul(height))
++            })
++            .ok_or_else(|| "prepared A8 atlas length overflow".to_owned())?;
++        if expected > MAX_ATLAS_PIXELS || pixels.len() != expected {
++            return Err("prepared A8 atlas pixel length is invalid or excessive".to_owned());
++        }
++        if sha256_hex(pixels) != resource.content_hash {
++            return Err("prepared A8 atlas content hash mismatch".to_owned());
++        }
++        by_id.insert(resource.id.as_str(), resource);
++    }
++    Ok(by_id)
++}
++
++fn validate_pair(pair: Option<&Pair>) -> Result<(), String> {
++    if let Some(pair) = pair
++        && (!valid_slug(&pair.id)
++            || !matches!(pair.kind.as_str(), "scroll" | "resize")
++            || !valid_sha256(&pair.sequence_hash)
++            || pair.steps != 2
++            || pair.step >= pair.steps)
++    {
++        return Err("prepared scene pair identity is invalid".to_owned());
++    }
++    Ok(())
++}
++
++fn validate_operation(
++    operation: &Operation,
++    clips: &BTreeSet<&str>,
++    resources: &BTreeMap<&str, &Resource>,
++) -> Result<(), String> {
++    operation_bounds(operation)?;
++    operation_color(operation)?;
++    if let Some(clip) = operation.clip.as_deref()
++        && !clips.contains(clip)
++    {
++        return Err(format!("operation references unknown clip {clip}"));
++    }
++    match operation.kind.as_str() {
++        "solid-quad" => {
++            if operation.resource.is_some() || atlas_fields(operation).iter().any(Option::is_some) {
++                return Err("solid quad cannot contain resource or atlas data".to_owned());
++            }
++        }
++        "monochrome-glyph" => {
++            let resource_id = operation
++                .resource
++                .as_deref()
++                .ok_or_else(|| "monochrome glyph requires an A8 resource".to_owned())?;
++            let resource = resources
++                .get(resource_id)
++                .copied()
++                .ok_or_else(|| "monochrome glyph references an unknown A8 resource".to_owned())?;
++            operation_atlas_bounds(operation, resource)?;
++        }
++        kind => return Err(format!("unsupported scene operation {kind}")),
++    }
++    Ok(())
++}
++
++fn operation_bounds(operation: &Operation) -> Result<[f32; 4], String> {
++    let [Some(x), Some(y), Some(width), Some(height)] =
++        [operation.x, operation.y, operation.width, operation.height]
++    else {
++        return Err("prepared operation requires complete bounds".to_owned());
++    };
++    if !x.is_finite() || !y.is_finite() || !finite_positive(width) || !finite_positive(height) {
++        return Err("prepared operation bounds are invalid".to_owned());
++    }
++    Ok([x, y, width, height])
++}
++
++fn operation_color(operation: &Operation) -> Result<[f32; 4], String> {
++    let [Some(r), Some(g), Some(b), Some(a)] = [
++        operation.red,
++        operation.green,
++        operation.blue,
++        operation.alpha,
++    ] else {
++        return Err("prepared operation requires a complete color".to_owned());
++    };
++    let color = [r, g, b, a];
++    if !color
++        .iter()
++        .all(|channel| channel.is_finite() && (0.0..=1.0).contains(channel))
++    {
++        return Err("prepared operation color is invalid".to_owned());
++    }
++    Ok(color)
++}
++
++fn operation_atlas_bounds(operation: &Operation, resource: &Resource) -> Result<[u32; 4], String> {
++    let [Some(x), Some(y), Some(width), Some(height)] = atlas_fields(operation) else {
++        return Err("monochrome glyph requires complete atlas bounds".to_owned());
++    };
++    if width == 0 || height == 0 {
++        return Err("monochrome glyph atlas bounds must be positive".to_owned());
++    }
++    let resource_width = resource.width.expect("validated resource width");
++    let resource_height = resource.height.expect("validated resource height");
++    if x.checked_add(width).is_none_or(|end| end > resource_width)
++        || y.checked_add(height)
++            .is_none_or(|end| end > resource_height)
++    {
++        return Err("monochrome glyph atlas bounds exceed the resource".to_owned());
++    }
++    Ok([x, y, width, height])
++}
++
++fn atlas_fields(operation: &Operation) -> [Option<u32>; 4] {
++    [
++        operation.atlas_x,
++        operation.atlas_y,
++        operation.atlas_width,
++        operation.atlas_height,
++    ]
++}
++
++fn canonical_workload_hash(source: &str) -> Result<String, String> {
++    let mut found = false;
++    let mut canonical = Vec::with_capacity(source.len());
++    for line in source.split_inclusive('\n') {
++        if line.starts_with("workload_hash = ") {
++            if found {
++                return Err("scene trace contains duplicate workload hashes".to_owned());
++            }
++            found = true;
++        } else {
++            canonical.extend_from_slice(line.as_bytes());
++        }
++    }
++    if !found {
++        return Err("scene trace lacks a workload hash".to_owned());
++    }
++    Ok(sha256_hex(&canonical))
++}
++
++fn sha256_hex(bytes: &[u8]) -> String {
++    const INITIAL: [u32; 8] = [
++        0x6a09_e667,
++        0xbb67_ae85,
++        0x3c6e_f372,
++        0xa54f_f53a,
++        0x510e_527f,
++        0x9b05_688c,
++        0x1f83_d9ab,
++        0x5be0_cd19,
++    ];
++    const ROUND: [u32; 64] = [
++        0x428a_2f98,
++        0x7137_4491,
++        0xb5c0_fbcf,
++        0xe9b5_dba5,
++        0x3956_c25b,
++        0x59f1_11f1,
++        0x923f_82a4,
++        0xab1c_5ed5,
++        0xd807_aa98,
++        0x1283_5b01,
++        0x2431_85be,
++        0x550c_7dc3,
++        0x72be_5d74,
++        0x80de_b1fe,
++        0x9bdc_06a7,
++        0xc19b_f174,
++        0xe49b_69c1,
++        0xefbe_4786,
++        0x0fc1_9dc6,
++        0x240c_a1cc,
++        0x2de9_2c6f,
++        0x4a74_84aa,
++        0x5cb0_a9dc,
++        0x76f9_88da,
++        0x983e_5152,
++        0xa831_c66d,
++        0xb003_27c8,
++        0xbf59_7fc7,
++        0xc6e0_0bf3,
++        0xd5a7_9147,
++        0x06ca_6351,
++        0x1429_2967,
++        0x27b7_0a85,
++        0x2e1b_2138,
++        0x4d2c_6dfc,
++        0x5338_0d13,
++        0x650a_7354,
++        0x766a_0abb,
++        0x81c2_c92e,
++        0x9272_2c85,
++        0xa2bf_e8a1,
++        0xa81a_664b,
++        0xc24b_8b70,
++        0xc76c_51a3,
++        0xd192_e819,
++        0xd699_0624,
++        0xf40e_3585,
++        0x106a_a070,
++        0x19a4_c116,
++        0x1e37_6c08,
++        0x2748_774c,
++        0x34b0_bcb5,
++        0x391c_0cb3,
++        0x4ed8_aa4a,
++        0x5b9c_ca4f,
++        0x682e_6ff3,
++        0x748f_82ee,
++        0x78a5_636f,
++        0x84c8_7814,
++        0x8cc7_0208,
++        0x90be_fffa,
++        0xa450_6ceb,
++        0xbef9_a3f7,
++        0xc671_78f2,
++    ];
++
++    let bit_len = (bytes.len() as u64).wrapping_mul(8);
++    let mut padded = Vec::with_capacity(bytes.len().saturating_add(72));
++    padded.extend_from_slice(bytes);
++    padded.push(0x80);
++    while padded.len() % 64 != 56 {
++        padded.push(0);
++    }
++    padded.extend_from_slice(&bit_len.to_be_bytes());
++
++    let mut state = INITIAL;
++    for chunk in padded.chunks_exact(64) {
++        let mut words = [0_u32; 64];
++        for (index, word) in words[..16].iter_mut().enumerate() {
++            let offset = index * 4;
++            *word = u32::from_be_bytes([
++                chunk[offset],
++                chunk[offset + 1],
++                chunk[offset + 2],
++                chunk[offset + 3],
++            ]);
++        }
++        for index in 16..64 {
++            let sigma0 = words[index - 15].rotate_right(7)
++                ^ words[index - 15].rotate_right(18)
++                ^ (words[index - 15] >> 3);
++            let sigma1 = words[index - 2].rotate_right(17)
++                ^ words[index - 2].rotate_right(19)
++                ^ (words[index - 2] >> 10);
++            words[index] = words[index - 16]
++                .wrapping_add(sigma0)
++                .wrapping_add(words[index - 7])
++                .wrapping_add(sigma1);
++        }
++
++        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
++        for index in 0..64 {
++            let sum1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
++            let choice = (e & f) ^ ((!e) & g);
++            let temp1 = h
++                .wrapping_add(sum1)
++                .wrapping_add(choice)
++                .wrapping_add(ROUND[index])
++                .wrapping_add(words[index]);
++            let sum0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
++            let majority = (a & b) ^ (a & c) ^ (b & c);
++            let temp2 = sum0.wrapping_add(majority);
++            h = g;
++            g = f;
++            f = e;
++            e = d.wrapping_add(temp1);
++            d = c;
++            c = b;
++            b = a;
++            a = temp1.wrapping_add(temp2);
++        }
++        for (slot, value) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
++            *slot = slot.wrapping_add(value);
++        }
++    }
++
++    let mut output = String::with_capacity(64);
++    for word in state {
++        use std::fmt::Write as _;
++        write!(&mut output, "{word:08x}").expect("writing to String cannot fail");
++    }
++    output
++}
++
++fn scaled_bounds(values: [f32; 4], scale: f32) -> Result<gpui::Bounds<ScaledPixels>, String> {
++    let scaled = values.map(|value| value * scale);
++    if !scaled.iter().all(|value| value.is_finite()) {
++        return Err("scaled prepared geometry is not finite".to_owned());
++    }
++    Ok(bounds(
++        point(ScaledPixels(scaled[0]), ScaledPixels(scaled[1])),
++        size(ScaledPixels(scaled[2]), ScaledPixels(scaled[3])),
++    ))
++}
++
++fn finite_positive(value: f32) -> bool {
++    value.is_finite() && value > 0.0
++}
++
++fn physical_matches(logical: f32, scale: f32, pixel: u32) -> bool {
++    let physical = f64::from(logical) * f64::from(scale);
++    let expected = f64::from(pixel);
++    physical.is_finite() && physical >= expected - 0.5 && physical < expected + 0.5
++}
++
++#[cfg(test)]
++mod tests {
++    use std::{borrow::Cow, fs, path::PathBuf, process};
++
++    use gpui::{
++        AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, DevicePixels, PlatformAtlas,
++        Point, Size, TileId,
++    };
++
++    use super::{canonical_workload_hash, decode, sha256_hex};
++    use crate::render_trace_file;
++
++    struct TestAtlas;
++
++    impl PlatformAtlas for TestAtlas {
++        fn get_or_insert_with<'a>(
++            &self,
++            _key: &AtlasKey,
++            build: &mut dyn FnMut() -> gpui::Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
++        ) -> gpui::Result<Option<AtlasTile>> {
++            let Some((size, bytes)) = build()? else {
++                return Ok(None);
++            };
++            assert_eq!(
++                bytes.len(),
++                usize::try_from(size.width.0 * size.height.0).unwrap()
++            );
++            Ok(Some(AtlasTile {
++                texture_id: AtlasTextureId {
++                    index: 3,
++                    kind: AtlasTextureKind::Monochrome,
++                },
++                tile_id: TileId(7),
++                padding: 0,
++                bounds: Bounds {
++                    origin: Point {
++                        x: DevicePixels(5),
++                        y: DevicePixels(6),
++                    },
++                    size,
++                },
++            }))
++        }
++
++        fn remove(&self, _key: &AtlasKey) {}
++    }
++
++    #[test]
++    fn builds_clipped_quad_glyph_and_pair_from_prepared_bytes() {
++        let source = valid_source();
++        let prepared = decode(&source).expect("valid trace");
++        let (scene, report) = prepared.build_scene(&TestAtlas).expect("build scene");
++        assert_eq!(prepared.identity.schema(), "alpine-scene-trace/v2");
++        assert_eq!(prepared.identity.pair_id(), Some("code-scroll"));
++        assert_eq!(prepared.identity.pair_kind(), Some("scroll"));
++        assert_eq!(
++            prepared.identity.pair_sequence_hash(),
++            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
++        );
++        assert_eq!(prepared.identity.pair_step(), Some(0));
++        assert_eq!(prepared.identity.pair_steps(), Some(2));
++        assert_eq!(scene.quads.len(), 1);
++        assert_eq!(scene.monochrome_sprites.len(), 1);
++        assert_eq!(scene.monochrome_sprites[0].tile.bounds.origin.x.0, 6);
++        assert_eq!(scene.monochrome_sprites[0].tile.bounds.origin.y.0, 7);
++        assert_eq!(report.clip_count(), 2);
++        assert_eq!(report.operation_count(), 2);
++        assert_eq!(report.quad_count(), 1);
++        assert_eq!(report.glyph_count(), 1);
++        assert_eq!(report.resource_count(), 1);
++        assert_eq!(report.resource_bytes(), 4);
++        assert_eq!(report.atlas_allocations(), 1);
++
++        let later_pair =
++            decode(&rebind(source.replace("step = 0", "step = 1"))).expect("valid later pair step");
++        assert_eq!(later_pair.identity.pair_step(), Some(1));
++
++        let distinct = crate::AdaptationReport {
++            clip_count: 2,
++            operation_count: 9,
++            quad_count: 2,
++            glyph_count: 3,
++            resource_count: 4,
++            resource_bytes: 5,
++            atlas_allocations: 6,
++        };
++        assert_eq!(distinct.quad_count(), 2);
++        assert_eq!(distinct.glyph_count(), 3);
++        assert_eq!(distinct.resource_count(), 4);
++        assert_eq!(distinct.atlas_allocations(), 6);
++    }
++
++    #[test]
++    fn sha256_matches_standard_vectors() {
++        assert_eq!(
++            sha256_hex(b""),
++            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
++        );
++        assert_eq!(
++            sha256_hex(b"abc"),
++            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
++        );
++    }
++
++    #[test]
++    fn rejects_workload_resource_and_pair_drift() {
++        let valid = valid_source();
++        rejects(
++            &valid.replace("revision = 1", "revision = 2"),
++            "canonical workload",
++        );
++        rejects(
++            &rebind(valid.replace("pixels = [255, 0, 255, 0]", "pixels = [255, 0]")),
++            "pixel length",
++        );
++        rejects(
++            &rebind(valid.replace("pixels = [255, 0, 255, 0]", "pixels = [0, 0, 0, 0]")),
++            "content hash",
++        );
++        rejects(
++            &rebind(valid.replace("step = 0", "step = 2")),
++            "pair identity",
++        );
++    }
++
++    #[test]
++    fn rejects_partial_or_out_of_range_glyphs() {
++        let valid = valid_source();
++        rejects(
++            &rebind(valid.replace("atlas_height = 1\n", "")),
++            "complete atlas",
++        );
++        rejects(
++            &rebind(valid.replace("atlas_width = 1", "atlas_width = 2")),
++            "exceed",
++        );
++        rejects(
++            &rebind(valid.replace("resource = \"editor-atlas\"", "resource = \"missing\"")),
++            "unknown A8",
++        );
++    }
++
++    #[test]
++    fn rejects_clip_operation_and_viewport_drift() {
++        let valid = valid_source();
++        rejects(
++            &rebind(valid.replace("id = \"right\"", "id = \"left\"")),
++            "duplicated",
++        );
++        rejects(
++            &rebind(valid.replace("kind = \"solid-quad\"", "kind = \"path\"")),
++            "unsupported",
++        );
++        rejects(
++            &rebind(valid.replace("clip = \"right\"", "clip = \"missing\"")),
++            "unknown clip",
++        );
++        rejects(
++            &rebind(valid.replace("pixel_width = 4", "pixel_width = 5")),
++            "disagrees",
++        );
++        rejects(
++            &rebind(valid.replace(
++                "clear_color = [0.1, 0.2, 0.3, 1.0]",
++                "clear_color = [0.1, 0.2, 0.3, 0.5]",
++            )),
++            "opaque",
++        );
++    }
++
++    #[cfg(target_os = "macos")]
++    #[test]
++    fn renders_v2_through_public_file_boundary() {
++        let root = unique_test_path("v2-render");
++        fs::create_dir(&root).expect("create test directory");
++        let trace = root.join("trace.toml");
++        let output = root.join("readback.bgra");
++        fs::write(&trace, valid_source()).expect("write trace");
++
++        let rendered = render_trace_file(&trace, &output).expect("render v2 trace");
++        assert_eq!(rendered.identity().schema(), "alpine-scene-trace/v2");
++        assert_eq!(rendered.adaptation().quad_count(), 1);
++        assert_eq!(rendered.adaptation().glyph_count(), 1);
++        assert_eq!(fs::read(&output).expect("read output").len(), 4 * 2 * 4);
++
++        fs::remove_file(trace).expect("remove trace");
++        fs::remove_file(output).expect("remove output");
++        fs::remove_dir(root).expect("remove test directory");
++    }
++
++    fn valid_source() -> String {
++        let content_hash = sha256_hex(&[255, 0, 255, 0]);
++        rebind(format!(
++            r#"schema = "alpine-scene-trace/v2"
++id = "prepared-code"
++workload_hash = "{}"
++revision = 1
++clear_color = [0.1, 0.2, 0.3, 1.0]
++
++[viewport]
++width = 4.0
++height = 2.0
++scale_factor = 1.0
++pixel_width = 4
++pixel_height = 2
++
++[[resources]]
++id = "editor-atlas"
++kind = "a8-atlas"
++content_hash = "{content_hash}"
++revision = 1
++width = 2
++height = 2
++pixels = [255, 0, 255, 0]
++
++[[clips]]
++id = "left"
++x = 0.0
++y = 0.0
++width = 2.0
++height = 2.0
++
++[[clips]]
++id = "right"
++x = 2.0
++y = 0.0
++width = 2.0
++height = 2.0
++
++[[operations]]
++sequence = 0
++kind = "solid-quad"
++clip = "left"
++x = 0.0
++y = 0.0
++width = 2.0
++height = 2.0
++red = 0.2
++green = 0.3
++blue = 0.4
++alpha = 1.0
++
++[[operations]]
++sequence = 1
++kind = "monochrome-glyph"
++resource = "editor-atlas"
++clip = "right"
++x = 2.0
++y = 0.0
++width = 1.0
++height = 1.0
++red = 0.8
++green = 0.9
++blue = 1.0
++alpha = 1.0
++atlas_x = 1
++atlas_y = 1
++atlas_width = 1
++atlas_height = 1
++
++[pair]
++id = "code-scroll"
++kind = "scroll"
++sequence_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
++step = 0
++steps = 2
++"#,
++            "0".repeat(64)
++        ))
++    }
++
++    fn rebind(source: String) -> String {
++        let canonical = canonical_workload_hash(&source).expect("canonical hash");
++        let mut rebound = String::with_capacity(source.len());
++        for line in source.split_inclusive('\n') {
++            if line.starts_with("workload_hash = ") {
++                rebound.push_str(&format!("workload_hash = \"{canonical}\"\n"));
++            } else {
++                rebound.push_str(line);
++            }
++        }
++        rebound
++    }
++
++    fn rejects(source: &str, expected: &str) {
++        let error = decode(source).err().expect("trace must be rejected");
++        assert!(error.contains(expected), "unexpected error: {error}");
++    }
++
++    fn unique_test_path(name: &str) -> PathBuf {
++        std::env::temp_dir().join(format!("alpine-trace-adapter-{}-{name}", process::id()))
++    }
++}
+diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+index 5523b9c0e0..694bb0ac33 100644
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -979,6 +979,19 @@ pub trait PlatformHeadlessRenderer {
+         size: Size<DevicePixels>,
+     ) -> Result<RgbaImage>;
+
++    /// Render a scene with an explicit clear color and return an RGBA image.
++    ///
++    /// Comparator adapters use this test-support boundary to preserve prepared
++    /// scene semantics without adding a synthetic background primitive.
++    fn render_scene_to_image_with_clear(
++        &mut self,
++        _scene: &Scene,
++        _size: Size<DevicePixels>,
++        _clear_color: crate::Rgba,
++    ) -> Result<RgbaImage> {
++        anyhow::bail!("explicit headless clear color is not supported by this renderer")
++    }
++
+     /// Render a scene to an offscreen target without reading the result back.
+     ///
+     /// This is the headless analogue of presenting a frame: it performs the
+diff --git a/crates/gpui_macos/src/metal_renderer.rs b/crates/gpui_macos/src/metal_renderer.rs
+index 4f6b0fee78..ea16728cc3 100644
+--- a/crates/gpui_macos/src/metal_renderer.rs
++++ b/crates/gpui_macos/src/metal_renderer.rs
+@@ -7,7 +7,7 @@ use cocoa::{
+     quartzcore::AutoresizingMask,
+ };
+ use gpui::{
+-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
++    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point, Rgba,
+     PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+ };
+ #[cfg(any(test, feature = "test-support"))]
+@@ -492,6 +492,22 @@ impl MetalRenderer {
+         scene: &Scene,
+         texture: &metal::TextureRef,
+         viewport_size: Size<DevicePixels>,
++    ) -> Result<metal::CommandBuffer> {
++        let alpha = if self.opaque { 1. } else { 0. };
++        self.render_frame_with_clear(
++            scene,
++            texture,
++            viewport_size,
++            metal::MTLClearColor::new(0., 0., 0., alpha),
++        )
++    }
++
++    fn render_frame_with_clear(
++        &mut self,
++        scene: &Scene,
++        texture: &metal::TextureRef,
++        viewport_size: Size<DevicePixels>,
++        clear_color: metal::MTLClearColor,
+     ) -> Result<metal::CommandBuffer> {
+         let mut writer = InstanceBufferWriter::new(
+             &self.device,
+@@ -516,6 +532,7 @@ impl MetalRenderer {
+             &mut writer,
+             texture,
+             viewport_size,
++            clear_color,
+         )?;
+
+         let instance_buffer_pool = self.instance_buffer_pool.clone();
+@@ -570,6 +587,26 @@ impl MetalRenderer {
+         &mut self,
+         scene: &Scene,
+         size: Size<DevicePixels>,
++    ) -> Result<RgbaImage> {
++        self.render_scene_to_image_with_clear(
++            scene,
++            size,
++            Rgba {
++                r: 0.,
++                g: 0.,
++                b: 0.,
++                a: 1.,
++            },
++        )
++    }
++
++    /// Renders a scene to an image with an explicit comparator clear color.
++    #[cfg(any(test, feature = "test-support"))]
++    pub fn render_scene_to_image_with_clear(
++        &mut self,
++        scene: &Scene,
++        size: Size<DevicePixels>,
++        clear_color: Rgba,
+     ) -> Result<RgbaImage> {
+         if size.width.0 <= 0 || size.height.0 <= 0 {
+             anyhow::bail!("Invalid size for render_scene_to_image: {:?}", size);
+@@ -588,7 +625,17 @@ impl MetalRenderer {
+         texture_descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
+         let target_texture = self.device.new_texture(&texture_descriptor);
+
+-        let command_buffer = self.render_frame(scene, &target_texture, size)?;
++        let command_buffer = self.render_frame_with_clear(
++            scene,
++            &target_texture,
++            size,
++            metal::MTLClearColor::new(
++                clear_color.r.into(),
++                clear_color.g.into(),
++                clear_color.b.into(),
++                clear_color.a.into(),
++            ),
++        )?;
+
+         // On discrete GPUs (non-unified memory), Managed textures require an
+         // explicit blit synchronize before the CPU can read back the rendered
+@@ -655,16 +702,15 @@ impl MetalRenderer {
+         writer: &mut InstanceBufferWriter,
+         texture: &metal::TextureRef,
+         viewport_size: Size<DevicePixels>,
++        clear_color: metal::MTLClearColor,
+     ) -> Result<metal::CommandBuffer> {
+         let command_queue = self.command_queue.clone();
+         let command_buffer = command_queue.new_command_buffer();
+-        let alpha = if self.opaque { 1. } else { 0. };
+-
+         let mut command_encoder = new_command_encoder_for_texture(
+             command_buffer,
+             texture,
+             viewport_size,
+-            Some(metal::MTLClearColor::new(0., 0., 0., alpha)),
++            Some(clear_color),
+         );
+
+         for batch in scene.batches() {
+@@ -1616,6 +1662,16 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
+         self.renderer.render_scene_to_image(scene, size)
+     }
+
++    fn render_scene_to_image_with_clear(
++        &mut self,
++        scene: &Scene,
++        size: Size<DevicePixels>,
++        clear_color: gpui::Rgba,
++    ) -> anyhow::Result<image::RgbaImage> {
++        self.renderer
++            .render_scene_to_image_with_clear(scene, size, clear_color)
++    }
++
+     fn render_scene(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
+         self.renderer.render_scene(scene, size)
+     }
