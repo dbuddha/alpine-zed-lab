@@ -138,6 +138,14 @@ if scripts/compare-readbacks.sh 8 "$test_dir/cpu.bgra" "$test_dir/alpine.bgra" "
     printf 'different GPUI pixels unexpectedly passed\n' >&2
     exit 1
 fi
+cp "$test_dir/cpu.bgra" "$test_dir/gpui.bgra"
+printf '\001' | dd of="$test_dir/gpui.bgra" bs=1 seek=0 conv=notrunc 2>/dev/null
+scripts/compare-readbacks.sh --max-channel-delta 1 8 "$test_dir/cpu.bgra" "$test_dir/gpui.bgra" >/dev/null
+printf '\002' | dd of="$test_dir/gpui.bgra" bs=1 seek=0 conv=notrunc 2>/dev/null
+if scripts/compare-readbacks.sh --max-channel-delta 1 8 "$test_dir/cpu.bgra" "$test_dir/gpui.bgra" >/dev/null 2>&1; then
+    printf 'out-of-tolerance GPUI pixels unexpectedly passed\n' >&2
+    exit 1
+fi
 
 revision_root="$test_dir/revision-root"
 mkdir -p "$revision_root"

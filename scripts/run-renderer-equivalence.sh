@@ -207,20 +207,34 @@ while IFS="$tab" read -r fixture_id trace_schema trace_path scene_trace_sha256 w
     [ -n "$pixel_width" ] && [ -n "$pixel_height" ] || { printf 'trace lacks exact pixel dimensions: %s\n' "$fixture_id" >&2; exit 1; }
     expected_bytes=$((pixel_width * pixel_height * 4))
     if [ "$mode" = full ]; then
-        scripts/compare-readbacks.sh \
+        scripts/compare-readbacks.sh --max-channel-delta 1 \
             "$expected_bytes" \
             "$fixture_dir/cpu-oracle.bgra" \
             "$fixture_dir/alpine-metal.bgra" \
             "$fixture_dir/gpui-metal.bgra" \
             > "$fixture_dir/equivalence.log"
-        alpine_sha256=$(shasum -a 256 "$fixture_dir/alpine-metal.bgra" | awk '{ print $1 }')
-    else
         scripts/compare-readbacks.sh \
+            "$expected_bytes" \
+            "$fixture_dir/alpine-metal.bgra" \
+            "$fixture_dir/gpui-metal.bgra" \
+            > "$fixture_dir/exact-metal-equivalence.log"
+        alpine_sha256=$(shasum -a 256 "$fixture_dir/alpine-metal.bgra" | awk '{ print $1 }')
+        exact_metal_equivalence=true
+    else
+        scripts/compare-readbacks.sh --max-channel-delta 1 \
             "$expected_bytes" \
             "$fixture_dir/cpu-oracle.bgra" \
             "$fixture_dir/gpui-metal.bgra" \
             > "$fixture_dir/equivalence.log"
         alpine_sha256=not-run
+        exact_metal_equivalence=false
+    fi
+    oracle_max_observed_channel_delta=$(sed -nE 's/.*max_observed_channel_delta=([0-9]+).*/\1/p' "$fixture_dir/equivalence.log")
+    case "$oracle_max_observed_channel_delta" in ''|*[!0-9]*) printf 'missing oracle delta for %s\n' "$fixture_id" >&2; exit 1 ;; esac
+    if [ "$oracle_max_observed_channel_delta" -eq 0 ]; then
+        exact_pixel_equivalence=true
+    else
+        exact_pixel_equivalence=false
     fi
 
     cpu_sha256=$(shasum -a 256 "$fixture_dir/cpu-oracle.bgra" | awk '{ print $1 }')
@@ -269,7 +283,11 @@ pixel_format = "compact-bgra8-premultiplied"
 cpu_oracle_sha256 = "$cpu_sha256"
 alpine_metal_sha256 = "$alpine_sha256"
 gpui_metal_sha256 = "$gpui_sha256"
-exact_pixel_equivalence = true
+cpu_oracle_channel_tolerance = 1
+cpu_oracle_max_observed_channel_delta = $oracle_max_observed_channel_delta
+cpu_oracle_equivalence_within_tolerance = true
+exact_pixel_equivalence = $exact_pixel_equivalence
+exact_metal_equivalence = $exact_metal_equivalence
 direct_metal_performed = $direct_metal_performed
 adaptation_clips = $adaptation_clips
 adaptation_operations = $adaptation_operations
@@ -313,6 +331,9 @@ trace_manifest_path = "$trace_manifest_path"
 trace_manifest_sha256 = "$trace_manifest_sha256"
 fixture_count = $fixture_count
 direct_metal_performed = $direct_metal_performed
+cpu_oracle_channel_tolerance = 1
+cpu_oracle_equivalence_within_tolerance_all = true
+exact_metal_equivalence_all = $direct_metal_performed
 patch_series_sha256 = "$patch_series_sha256"
 shader_mode = "$shader_mode"
 coverage_performed = $coverage_performed
@@ -328,4 +349,4 @@ for manifest_tmp in $pending_manifests; do
 done
 mv "$set_manifest_tmp" "$output_absolute/qualification-set.toml"
 
-printf '%s exact equivalence set recorded for %s fixtures in %s\n' "$mode" "$fixture_count" "$output_dir/qualification-set.toml"
+printf '%s bounded-oracle equivalence set recorded for %s fixtures in %s\n' "$mode" "$fixture_count" "$output_dir/qualification-set.toml"

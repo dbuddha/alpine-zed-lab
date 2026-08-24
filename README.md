@@ -90,11 +90,13 @@ ALPINE_ZED_RUNTIME_SHADERS=1 scripts/run-renderer-equivalence.sh artifacts/local
 ```
 
 Runtime shader mode is supporting evidence only and is marked unqualified in
-the generated manifests. A passing set establishes exact pixels only for the
-eight pinned prepared scenes. Every fixture retains its CPU, GPUI Metal, and,
-when physically run, Alpine Direct Metal readback plus adaptation counters and
-pair identity. It does not establish full primitive coverage, lifecycle or
-resource equivalence, application parity, timing, memory, or superiority.
+the generated manifests. A passing set establishes CPU-oracle agreement within
+one BGRA8 channel unit for the eight pinned prepared scenes. A full physical run
+also requires Alpine Direct Metal and GPUI Metal to be byte-identical. Every
+fixture retains its CPU, GPUI Metal, and, when physically run, Alpine Direct
+Metal readback plus the observed oracle delta, adaptation counters, and pair
+identity. It does not establish full primitive coverage, lifecycle or resource
+equivalence, application parity, timing, memory, or superiority.
 
 To reproduce the source-assurance gates locally, install the pinned
 `cargo-llvm-cov` and `cargo-mutants` versions shown in CI, then run:
@@ -109,7 +111,7 @@ scripts/run-renderer-equivalence.sh artifacts/local-deep-assurance
 The coverage gate currently requires at least 95% line coverage and 90%
 function coverage. Mutation succeeds only when every generated adapter mutant
 is caught or cannot compile. These are assertion-strength gates, not substitutes
-for exact readback equivalence.
+for bounded oracle and exact Metal-to-Metal readback equivalence.
 
 Hosted CI reads the public Alpine revision without a cross-repository secret.
 Hosted Apple Silicon checks run the pinned GPUI Metal result against the Alpine
