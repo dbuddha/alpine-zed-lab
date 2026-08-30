@@ -13,7 +13,7 @@ license obligations.
 
 The lab pins Zed `v1.15.0` at
 `e17dc4f9d50db73a458b64dcce50ecd4878b98a3` and Alpine at
-`665beaa69adb80c6bf34de911aefa6e874813ae1`. It establishes source isolation,
+`4e6ee28668d3cd7a62e347e7b9f96c99318956ab`. It establishes source isolation,
 license checks, an immutable eight-fixture trace manifest, and reviewed
 patch-series checks. The GPL adapter preserves the version 1 solid-quad control
 and independently decodes version 2 clips, quads, one prepared A8 atlas,
