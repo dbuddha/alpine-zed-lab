@@ -1023,10 +1023,10 @@ index 0000000000..cdae1484c8
 +}
 diff --git a/crates/alpine_trace_adapter/src/sequence.rs b/crates/alpine_trace_adapter/src/sequence.rs
 new file mode 100644
-index 0000000000..8ab6ec44e7
+index 0000000000..7fdea41453
 --- /dev/null
 +++ b/crates/alpine_trace_adapter/src/sequence.rs
-@@ -0,0 +1,921 @@
+@@ -0,0 +1,1490 @@
 +use std::{
 +    fmt::Write as _,
 +    fs,
@@ -1140,6 +1140,20 @@ index 0000000000..8ab6ec44e7
 +    identity: AtlasIdentity,
 +}
 +
++fn validate_teardown_ownership(renderer_live: bool, atlas_live: bool) -> Result<(), String> {
++    if !renderer_live || !atlas_live {
++        return Err("GPUI lifecycle teardown has no live renderer and atlas owner".to_owned());
++    }
++    Ok(())
++}
++
++fn validate_generation_vacancy(renderer_live: bool, atlas_live: bool) -> Result<(), String> {
++    if renderer_live || atlas_live {
++        return Err("GPUI lifecycle attempted to start a generation while one was live".to_owned());
++    }
++    Ok(())
++}
++
 +/// Bounded summary of one completed GPUI atlas-lifecycle sequence.
 +#[derive(Clone, Debug, Eq, PartialEq)]
 +pub struct SequenceReport {
@@ -1205,11 +1219,7 @@ index 0000000000..8ab6ec44e7
 +
 +    for step in &validated.steps {
 +        if step.transition == Transition::Teardown {
-+            if renderer.is_none() || live_atlas.is_none() {
-+                return Err(
-+                    "GPUI lifecycle teardown has no live renderer and atlas owner".to_owned(),
-+                );
-+            }
++            validate_teardown_ownership(renderer.is_some(), live_atlas.is_some())?;
 +            live_atlas = None;
 +            renderer = None;
 +            let _ = write!(
@@ -1226,11 +1236,7 @@ index 0000000000..8ab6ec44e7
 +        }
 +
 +        if step.transition.starts_generation() {
-+            if renderer.is_some() || live_atlas.is_some() {
-+                return Err(
-+                    "GPUI lifecycle attempted to start a generation while one was live".to_owned(),
-+                );
-+            }
++            validate_generation_vacancy(renderer.is_some(), live_atlas.is_some())?;
 +            renderer =
 +                Some(gpui_platform::current_headless_renderer().ok_or_else(|| {
 +                    "pinned GPUI headless Metal renderer is unavailable".to_owned()
@@ -1667,7 +1673,11 @@ index 0000000000..8ab6ec44e7
 +    reason = "isolated protocol fixtures fail their owning test"
 +)]
 +mod tests {
-+    use super::{STEP_COUNT, load_validated, render_sequence_file};
++    use super::{
++        AtlasIdentity, MAX_MANIFEST_BYTES, MAX_PATH_BYTES, STEP_COUNT, Transition, ValidatedStep,
++        load_validated, render_sequence_file, resolve_repository_path, validate_generation_vacancy,
++        validate_relationships, validate_teardown_ownership, visible_identity,
++    };
 +    use crate::v2::{canonical_workload_hash, sha256_hex};
 +    use std::{fs, path::PathBuf, process};
 +
@@ -1703,6 +1713,460 @@ index 0000000000..8ab6ec44e7
 +        assert!(load_validated(&fixture.manifest, &fixture.root).is_err());
 +    }
 +
++    #[test]
++    fn rejects_manifest_transport_policy_and_transition_drift() {
++        let fixture = Fixture::new("manifest-policy");
++
++        fs::write(&fixture.manifest, vec![b'x'; MAX_MANIFEST_BYTES + 1])
++            .expect("write oversized manifest");
++        assert_eq!(
++            fixture.error(),
++            "trace sequence manifest exceeds the byte limit"
++        );
++        fs::write(&fixture.manifest, [0xff]).expect("write non-UTF-8 manifest");
++        assert_eq!(fixture.error(), "trace sequence manifest is not UTF-8");
++        fs::write(&fixture.manifest, "schema = [").expect("write malformed manifest");
++        assert!(
++            fixture
++                .error()
++                .starts_with("cannot parse trace sequence manifest:")
++        );
++
++        let padding = MAX_MANIFEST_BYTES
++            .checked_sub(fixture.original.len())
++            .expect("fixture fits manifest limit");
++        assert!(padding >= 2);
++        let mut exact_limit = fixture.original.clone();
++        exact_limit.push_str("\n#");
++        exact_limit.push_str(&"x".repeat(padding - 2));
++        assert_eq!(exact_limit.len(), MAX_MANIFEST_BYTES);
++        fs::write(&fixture.manifest, exact_limit).expect("write exact-limit manifest");
++        load_validated(&fixture.manifest, &fixture.root).expect("exact byte limit is accepted");
++
++        for (from, to) in [
++            (
++                "schema = \"alpine-scene-trace-sequence/v1\"",
++                "schema = \"unsupported\"",
++            ),
++            (
++                "id = \"editor-atlas-lifecycle\"",
++                "id = \"Editor-atlas-lifecycle\"",
++            ),
++            ("task = 353", "task = 354"),
++            (
++                "comparison_level = \"renderer-only\"",
++                "comparison_level = \"product\"",
++            ),
++            (
++                "cpu_oracle_channel_tolerance = 1",
++                "cpu_oracle_channel_tolerance = 2",
++            ),
++            (
++                "renderer_timing_performed = false",
++                "renderer_timing_performed = true",
++            ),
++            (
++                "memory_claim_performed = false",
++                "memory_claim_performed = true",
++            ),
++        ] {
++            fixture.rewrite(|source| source.replacen(from, to, 1));
++            assert_eq!(fixture.error(), "trace sequence policy identity is invalid");
++        }
++
++        fixture.rewrite(|source| {
++            source.replacen(
++                "transition = \"full-admission\"",
++                "transition = \"other\"",
++                1,
++            )
++        });
++        assert_eq!(
++            fixture.error(),
++            "unsupported trace sequence transition \"other\""
++        );
++        fixture.rewrite(|source| {
++            source.replacen("renderer_generation = 1", "renderer_generation = 2", 1)
++        });
++        assert_eq!(fixture.error(), "trace sequence step 0 identity is invalid");
++        fixture.rewrite(|source| {
++            source.replacen(
++                "expected_terminal_retained_bytes = 0",
++                "expected_terminal_retained_bytes = 1",
++                1,
++            )
++        });
++        assert_eq!(fixture.error(), "trace sequence step 0 identity is invalid");
++        fixture.rewrite(|source| {
++            rewrite_step(source, 4, |step| {
++                format!("{step}scene = \"assurance/qualification/v2/initial.toml\"\n")
++            })
++        });
++        assert_eq!(
++            fixture.error(),
++            "trace sequence teardown retained visible identity"
++        );
++        for retained in [
++            format!("workload_hash = \"{}\"\n", "a".repeat(64)),
++            "resource_id = \"editor-atlas\"\n".to_owned(),
++            "resource_revision = 1\n".to_owned(),
++            "atlas_width = 1\n".to_owned(),
++            "atlas_height = 1\n".to_owned(),
++            format!("content_hash = \"{}\"\n", "b".repeat(64)),
++        ] {
++            fixture.rewrite(|source| rewrite_step(source, 4, |step| format!("{step}{retained}")));
++            assert_eq!(
++                fixture.error(),
++                "trace sequence teardown retained visible identity"
++            );
++        }
++        for (from, to) in [
++            (
++                "expected_atlas_upload_bytes = 0",
++                "expected_atlas_upload_bytes = 1",
++            ),
++            ("expected_cpu_bytes = 0", "expected_cpu_bytes = 1"),
++        ] {
++            fixture.rewrite(|source| rewrite_step(source, 4, |step| step.replacen(from, to, 1)));
++            assert_eq!(
++                fixture.error(),
++                "trace sequence teardown retained visible identity"
++            );
++        }
++    }
++
++    #[test]
++    fn rejects_missing_visible_identity_and_byte_drift() {
++        let fixture = Fixture::new("visible-identity");
++        for (prefix, expected) in [
++            ("scene = ", "trace sequence step 0 lacks a scene"),
++            (
++                "workload_hash = ",
++                "trace sequence step 0 lacks a workload hash",
++            ),
++            (
++                "resource_id = ",
++                "trace sequence step 0 lacks a resource id",
++            ),
++            (
++                "resource_revision = ",
++                "trace sequence step 0 lacks a resource revision",
++            ),
++            (
++                "atlas_width = ",
++                "trace sequence step 0 lacks an atlas width",
++            ),
++            (
++                "atlas_height = ",
++                "trace sequence step 0 lacks an atlas height",
++            ),
++            (
++                "content_hash = ",
++                "trace sequence step 0 lacks a content hash",
++            ),
++        ] {
++            fixture.rewrite(|source| rewrite_step(source, 0, |step| remove_line(step, prefix)));
++            assert_eq!(fixture.error(), expected);
++        }
++
++        for (from, to) in [
++            (
++                "resource_id = \"editor-atlas\"".to_owned(),
++                "resource_id = \"other-atlas\"".to_owned(),
++            ),
++            (
++                "resource_revision = 1".to_owned(),
++                "resource_revision = 2".to_owned(),
++            ),
++            ("atlas_width = 2".to_owned(), "atlas_width = 3".to_owned()),
++            ("atlas_height = 2".to_owned(), "atlas_height = 3".to_owned()),
++            (
++                format!("content_hash = \"{}\"", content(&fixture.initial)),
++                format!("content_hash = \"{}\"", "c".repeat(64)),
++            ),
++        ] {
++            fixture.rewrite(|source| rewrite_step(source, 0, |step| step.replacen(&from, &to, 1)));
++            assert_eq!(
++                fixture.error(),
++                "trace sequence step 0 atlas identity drifted"
++            );
++        }
++        fixture.rewrite(|source| {
++            rewrite_step(source, 0, |step| {
++                step.replacen(
++                    "expected_atlas_upload_bytes = 4",
++                    "expected_atlas_upload_bytes = 5",
++                    1,
++                )
++            })
++        });
++        assert_eq!(
++            fixture.error(),
++            "trace sequence step 0 byte identity drifted"
++        );
++        fixture.rewrite(|source| {
++            rewrite_step(source, 0, |step| {
++                step.replacen("expected_cpu_bytes = 32", "expected_cpu_bytes = 31", 1)
++            })
++        });
++        assert_eq!(
++            fixture.error(),
++            "trace sequence step 0 byte identity drifted"
++        );
++    }
++
++    #[test]
++    fn rejects_cross_step_lifecycle_identity_drift() {
++        let fixture = Fixture::new("relationships");
++        let initial_workload = workload(&fixture.initial).to_owned();
++        let initial_content = content(&fixture.initial).to_owned();
++        let changed_workload = workload(&fixture.changed).to_owned();
++        let changed_content = content(&fixture.changed).to_owned();
++
++        fixture.rewrite(|source| {
++            rewrite_step(source, 1, |step| {
++                step.replace("initial.toml", "content.toml")
++                    .replace(&initial_workload, &changed_workload)
++                    .replace("resource_revision = 1", "resource_revision = 2")
++                    .replace(&initial_content, &changed_content)
++            })
++        });
++        assert_eq!(
++            fixture.error(),
++            "compatible reuse must preserve workload and atlas identity"
++        );
++
++        fixture.rewrite(|source| {
++            rewrite_step(source, 2, |step| {
++                step.replace("content.toml", "initial.toml")
++                    .replace(&changed_workload, &initial_workload)
++                    .replace("resource_revision = 2", "resource_revision = 1")
++                    .replace(&changed_content, &initial_content)
++            })
++        });
++        assert_eq!(
++            fixture.error(),
++            "content replacement identity is incompatible"
++        );
++
++        fixture.rewrite(|source| {
++            rewrite_step(source, 3, |step| {
++                step.replace("capacity.toml", "content.toml")
++                    .replace(workload(&fixture.capacity), &changed_workload)
++                    .replace("resource_revision = 3", "resource_revision = 2")
++                    .replace("atlas_width = 4", "atlas_width = 2")
++                    .replace(content(&fixture.capacity), &changed_content)
++                    .replace(
++                        "expected_atlas_upload_bytes = 8",
++                        "expected_atlas_upload_bytes = 4",
++                    )
++            })
++        });
++        assert_eq!(
++            fixture.error(),
++            "capacity replacement identity is incompatible"
++        );
++
++        fixture.rewrite(|source| {
++            rewrite_step(source, 5, |step| {
++                step.replace("capacity.toml", "content.toml")
++                    .replace(workload(&fixture.capacity), &changed_workload)
++                    .replace("resource_revision = 3", "resource_revision = 2")
++                    .replace("atlas_width = 4", "atlas_width = 2")
++                    .replace(content(&fixture.capacity), &changed_content)
++                    .replace(
++                        "expected_atlas_upload_bytes = 8",
++                        "expected_atlas_upload_bytes = 4",
++                    )
++            })
++        });
++        assert_eq!(
++            fixture.error(),
++            "full resynchronization must reconstruct the latest exact state"
++        );
++    }
++
++    #[test]
++    fn rejects_each_replacement_relationship_predicate_independently() {
++        let mut steps = valid_relationship_steps();
++        steps[2].atlas.as_mut().unwrap().id = "other-atlas".to_owned();
++        steps[3].atlas.as_mut().unwrap().id = "other-atlas".to_owned();
++        steps[5].atlas.as_mut().unwrap().id = "other-atlas".to_owned();
++        assert_relationship_error(&steps, "content replacement identity is incompatible");
++
++        let mut steps = valid_relationship_steps();
++        steps[2].atlas.as_mut().unwrap().width = 3;
++        assert_relationship_error(&steps, "content replacement identity is incompatible");
++
++        let mut steps = valid_relationship_steps();
++        steps[2].atlas.as_mut().unwrap().height = 3;
++        assert_relationship_error(&steps, "content replacement identity is incompatible");
++
++        let mut steps = valid_relationship_steps();
++        steps[2].atlas.as_mut().unwrap().revision = 1;
++        assert_relationship_error(&steps, "content replacement identity is incompatible");
++
++        let mut steps = valid_relationship_steps();
++        steps[2].atlas.as_mut().unwrap().content_hash = "initial".to_owned();
++        assert_relationship_error(&steps, "content replacement identity is incompatible");
++
++        let mut steps = valid_relationship_steps();
++        steps[3].atlas.as_mut().unwrap().revision = 2;
++        steps[5].atlas.as_mut().unwrap().revision = 2;
++        assert_relationship_error(&steps, "capacity replacement identity is incompatible");
++
++        let mut steps = valid_relationship_steps();
++        steps[3].atlas.as_mut().unwrap().width = 2;
++        steps[5].atlas.as_mut().unwrap().width = 2;
++        assert_relationship_error(&steps, "capacity replacement identity is incompatible");
++    }
++
++    #[test]
++    fn rejects_unavailable_paths_owners_and_visible_identity() {
++        let fixture = Fixture::new("failure-boundaries");
++        let missing_manifest = fixture.root.join("missing-sequence.toml");
++        assert!(
++            load_validated(&missing_manifest, &fixture.root)
++                .err()
++                .expect("missing manifest must fail")
++                .starts_with("cannot read ")
++        );
++        assert!(
++            load_validated(&fixture.manifest, &fixture.root.join("missing-root"))
++                .err()
++                .expect("missing root must fail")
++                .starts_with("cannot canonicalize ")
++        );
++
++        fixture.rewrite(|source| source.replacen("initial.toml", "absent.toml", 1));
++        assert!(
++            fixture
++                .error()
++                .starts_with("cannot inspect trace sequence path ")
++        );
++        fixture.rewrite(|source| {
++            source.replacen(
++                "assurance/qualification/v2/initial.toml",
++                "assurance/qualification/v2/../initial.toml",
++                1,
++            )
++        });
++        assert!(fixture.error().contains("scene path"));
++
++        for value in [
++            "qualification/v2/initial.toml".to_owned(),
++            "assurance/qualification/v2/initial.txt".to_owned(),
++            "assurance/qualification/v2/Initial.toml".to_owned(),
++            format!(
++                "assurance/qualification/v2/{}.toml",
++                "a".repeat(MAX_PATH_BYTES)
++            ),
++        ] {
++            assert_eq!(
++                resolve_repository_path(&fixture.root, &value)
++                    .err()
++                    .expect("invalid path must fail"),
++                format!("trace sequence scene path {value:?} is invalid")
++            );
++        }
++        let prefix = "assurance/qualification/v2/";
++        let suffix = ".toml";
++        let exact_path = format!(
++            "{prefix}{}{suffix}",
++            "a".repeat(MAX_PATH_BYTES - prefix.len() - suffix.len())
++        );
++        assert_eq!(exact_path.len(), MAX_PATH_BYTES);
++        assert!(
++            resolve_repository_path(&fixture.root, &exact_path)
++                .err()
++                .expect("missing exact-limit path must fail closed")
++                .starts_with("cannot inspect trace sequence path ")
++        );
++        let directory_path = fixture
++            .root
++            .join("assurance/qualification/v2/directory.toml");
++        fs::create_dir(&directory_path).expect("create directory fixture");
++        assert!(
++            resolve_repository_path(&fixture.root, "assurance/qualification/v2/directory.toml")
++                .err()
++                .expect("directory is not a trace file")
++                .ends_with("is not a repository file")
++        );
++
++        validate_teardown_ownership(true, true).expect("complete owner is valid");
++        assert!(validate_teardown_ownership(false, true).is_err());
++        assert!(validate_teardown_ownership(true, false).is_err());
++        validate_generation_vacancy(false, false).expect("vacant generation is valid");
++        assert!(validate_generation_vacancy(true, false).is_err());
++        assert!(validate_generation_vacancy(false, true).is_err());
++
++        let missing_workload = ValidatedStep {
++            sequence: 0,
++            transition: Transition::FullAdmission,
++            renderer_generation: 1,
++            scene_path: None,
++            workload_hash: None,
++            atlas: None,
++            expected_atlas_upload_bytes: 0,
++            expected_terminal_retained_bytes: 0,
++            expected_cpu_bytes: 0,
++            prepared: None,
++        };
++        assert_eq!(
++            visible_identity(&missing_workload)
++                .err()
++                .expect("missing workload must fail"),
++            "visible sequence step lacks workload identity"
++        );
++        let missing_atlas = ValidatedStep {
++            workload_hash: Some("a".repeat(64)),
++            ..missing_workload
++        };
++        assert_eq!(
++            visible_identity(&missing_atlas)
++                .err()
++                .expect("missing atlas must fail"),
++            "visible sequence step lacks atlas identity"
++        );
++
++        let existing_output = fixture.root.join("existing-output");
++        fs::create_dir(&existing_output).expect("create existing output");
++        assert!(
++            render_sequence_file(&fixture.manifest, &fixture.root, &existing_output)
++                .err()
++                .expect("existing output must fail")
++                .starts_with("cannot create fresh sequence output ")
++        );
++
++        let mut solid = fixture.initial.clone();
++        let resource_start = solid.find("[[resources]]").expect("resource start");
++        let clip_start = solid.find("[[clips]]").expect("clip start");
++        solid.replace_range(resource_start..clip_start, "");
++        solid = solid.replace("kind = \"monochrome-glyph\"", "kind = \"solid-quad\"");
++        for prefix in [
++            "resource = ",
++            "atlas_x = ",
++            "atlas_y = ",
++            "atlas_width = ",
++            "atlas_height = ",
++        ] {
++            solid = remove_line(solid, prefix);
++        }
++        let prior_hash = workload(&solid).to_owned();
++        solid = rebind(solid.replace(&prior_hash, &"0".repeat(64)));
++        fs::write(
++            fixture.root.join("assurance/qualification/v2/initial.toml"),
++            &solid,
++        )
++        .expect("write atlas-free scene");
++        fixture.rewrite(|source| {
++            rewrite_step(source, 0, |step| {
++                step.replace(workload(&fixture.initial), workload(&solid))
++            })
++        });
++        assert_eq!(fixture.error(), "trace sequence step 0 has no A8 atlas");
++    }
++
 +    #[cfg(target_os = "macos")]
 +    #[test]
 +    fn executes_two_gpui_generations_without_warm_reallocation() {
@@ -1710,6 +2174,7 @@ index 0000000000..8ab6ec44e7
 +        let output = fixture.root.join("evidence");
 +        let report = render_sequence_file(&fixture.manifest, &fixture.root, &output)
 +            .expect("render lifecycle");
++        assert_eq!(report.id(), "editor-atlas-lifecycle");
 +        assert_eq!(report.visible_steps(), 5);
 +        assert_eq!(report.renderer_generations(), 2);
 +        assert_eq!(report.atlas_allocations(), 4);
@@ -1725,6 +2190,8 @@ index 0000000000..8ab6ec44e7
 +        manifest: PathBuf,
 +        original: String,
 +        initial: String,
++        changed: String,
++        capacity: String,
 +    }
 +
 +    impl Fixture {
@@ -1748,6 +2215,8 @@ index 0000000000..8ab6ec44e7
 +                manifest,
 +                original,
 +                initial,
++                changed: content,
++                capacity,
 +            }
 +        }
 +        fn rewrite(&self, rewrite: impl FnOnce(String) -> String) {
@@ -1755,6 +2224,11 @@ index 0000000000..8ab6ec44e7
 +        }
 +        fn restore(&self) {
 +            fs::write(&self.manifest, &self.original).expect("restore manifest");
++        }
++        fn error(&self) -> String {
++            load_validated(&self.manifest, &self.root)
++                .err()
++                .expect("sequence must be rejected")
 +        }
 +    }
 +    impl Drop for Fixture {
@@ -1840,6 +2314,101 @@ index 0000000000..8ab6ec44e7
 +    }
 +    fn content(source: &str) -> &str {
 +        field(source, "content_hash = \"")
++    }
++
++    fn rewrite_step(
++        source: String,
++        index: usize,
++        rewrite: impl FnOnce(String) -> String,
++    ) -> String {
++        let mut sections = source
++            .split("[[steps]]")
++            .map(str::to_owned)
++            .collect::<Vec<_>>();
++        sections[index + 1] = rewrite(sections[index + 1].clone());
++        sections.join("[[steps]]")
++    }
++
++    fn remove_line(source: String, prefix: &str) -> String {
++        let mut filtered = source
++            .lines()
++            .filter(|line| !line.starts_with(prefix))
++            .collect::<Vec<_>>()
++            .join("\n");
++        filtered.push('\n');
++        filtered
++    }
++
++    fn valid_relationship_steps() -> Vec<ValidatedStep> {
++        let initial = AtlasIdentity {
++            id: "editor-atlas".to_owned(),
++            revision: 1,
++            width: 2,
++            height: 2,
++            content_hash: "initial".to_owned(),
++        };
++        let content = AtlasIdentity {
++            revision: 2,
++            content_hash: "content".to_owned(),
++            ..initial.clone()
++        };
++        let capacity = AtlasIdentity {
++            revision: 3,
++            width: 4,
++            content_hash: "capacity".to_owned(),
++            ..content.clone()
++        };
++        vec![
++            relationship_step(Transition::FullAdmission, "initial", initial.clone()),
++            relationship_step(Transition::CompatibleReuse, "initial", initial),
++            relationship_step(Transition::ContentReplacement, "content", content),
++            relationship_step(
++                Transition::CapacityReplacement,
++                "capacity",
++                capacity.clone(),
++            ),
++            ValidatedStep {
++                sequence: 4,
++                transition: Transition::Teardown,
++                renderer_generation: 1,
++                scene_path: None,
++                workload_hash: None,
++                atlas: None,
++                expected_atlas_upload_bytes: 0,
++                expected_terminal_retained_bytes: 0,
++                expected_cpu_bytes: 0,
++                prepared: None,
++            },
++            relationship_step(Transition::FullResynchronization, "capacity", capacity),
++        ]
++    }
++
++    fn relationship_step(
++        transition: Transition,
++        workload_hash: &str,
++        atlas: AtlasIdentity,
++    ) -> ValidatedStep {
++        ValidatedStep {
++            sequence: 0,
++            transition,
++            renderer_generation: 1,
++            scene_path: None,
++            workload_hash: Some(workload_hash.to_owned()),
++            atlas: Some(atlas),
++            expected_atlas_upload_bytes: 0,
++            expected_terminal_retained_bytes: 0,
++            expected_cpu_bytes: 0,
++            prepared: None,
++        }
++    }
++
++    fn assert_relationship_error(steps: &[ValidatedStep], expected: &str) {
++        assert_eq!(
++            validate_relationships(steps)
++                .err()
++                .expect("relationship must fail"),
++            expected
++        );
 +    }
 +
 +    fn manifest_source(initial: &str, changed: &str, capacity: &str) -> String {
@@ -1950,10 +2519,10 @@ index 0000000000..8ab6ec44e7
 +}
 diff --git a/crates/alpine_trace_adapter/src/v2.rs b/crates/alpine_trace_adapter/src/v2.rs
 new file mode 100644
-index 0000000000..682e732598
+index 0000000000..c8a51168d5
 --- /dev/null
 +++ b/crates/alpine_trace_adapter/src/v2.rs
-@@ -0,0 +1,1045 @@
+@@ -0,0 +1,1149 @@
 +use std::{
 +    borrow::Cow,
 +    collections::{BTreeMap, BTreeSet},
@@ -2720,6 +3289,8 @@ index 0000000000..682e732598
 +
 +    struct TestAtlas;
 +
++    struct RejectingAtlas;
++
 +    impl PlatformAtlas for TestAtlas {
 +        fn get_or_insert_with<'a>(
 +            &self,
@@ -2748,6 +3319,18 @@ index 0000000000..682e732598
 +                    size,
 +                },
 +            }))
++        }
++
++        fn remove(&self, _key: &AtlasKey) {}
++    }
++
++    impl PlatformAtlas for RejectingAtlas {
++        fn get_or_insert_with<'a>(
++            &self,
++            _key: &AtlasKey,
++            _build: &mut dyn FnMut() -> gpui::Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
++        ) -> gpui::Result<Option<AtlasTile>> {
++            Ok(None)
 +        }
 +
 +        fn remove(&self, _key: &AtlasKey) {}
@@ -2874,6 +3457,96 @@ index 0000000000..682e732598
 +            )),
 +            "opaque",
 +        );
++    }
++
++    #[test]
++    fn rejects_incomplete_non_finite_and_misclassified_primitives() {
++        assert!(decode("schema = [").is_err());
++        let valid = valid_source();
++        rejects(
++            &rebind(valid.replace(
++                "schema = \"alpine-scene-trace/v2\"",
++                "schema = \"unsupported\"",
++            )),
++            "schema",
++        );
++        rejects(
++            &rebind(valid.replace("id = \"prepared-code\"", "id = \"Prepared-code\"")),
++            "identity",
++        );
++        rejects(
++            &rebind(valid.replacen("revision = 1", "revision = 0", 1)),
++            "revision",
++        );
++        rejects(
++            &rebind(valid.replace("scale_factor = 1.0", "scale_factor = 0.0")),
++            "finite and positive",
++        );
++        rejects(
++            &rebind(valid.replace("sequence = 1", "sequence = 4")),
++            "contiguous",
++        );
++        rejects(
++            &rebind(valid.replacen("red = 0.2", "red = 2.0", 1)),
++            "color",
++        );
++        rejects(
++            &rebind(valid.replace("atlas_width = 1", "atlas_width = 0")),
++            "positive",
++        );
++        rejects(
++            &rebind(valid.replacen(
++                "kind = \"solid-quad\"\nclip = \"left\"",
++                "kind = \"solid-quad\"\nresource = \"editor-atlas\"\nclip = \"left\"",
++                1,
++            )),
++            "solid quad",
++        );
++    }
++
++    #[test]
++    fn rejects_missing_and_duplicate_canonical_hash_fields() {
++        assert_eq!(
++            canonical_workload_hash("schema = \"alpine-scene-trace/v2\"\n")
++                .err()
++                .expect("missing hash must fail"),
++            "scene trace lacks a workload hash"
++        );
++        assert_eq!(
++            canonical_workload_hash("workload_hash = \"a\"\nworkload_hash = \"b\"\n")
++                .err()
++                .expect("duplicate hash must fail"),
++            "scene trace contains duplicate workload hashes"
++        );
++    }
++
++    #[test]
++    fn rejects_missing_files_resources_and_atlas_admission() {
++        let root = unique_test_path("failure-boundaries");
++        assert!(
++            render_trace_file(&root.join("missing.toml"), &root.join("output.bgra"))
++                .err()
++                .expect("missing trace must fail")
++                .starts_with("cannot read trace ")
++        );
++
++        let source = valid_source();
++        rejects(
++            &rebind(source.replace("resource = \"editor-atlas\"\n", "")),
++            "requires an A8 resource",
++        );
++
++        let prepared = decode(&source).expect("valid trace");
++        assert_eq!(
++            prepared
++                .admit_atlas(&RejectingAtlas)
++                .err()
++                .expect("rejected atlas admission must fail"),
++            "GPUI atlas rejected the prepared A8 resource"
++        );
++        let (key, _, _) = prepared.admit_atlas(&TestAtlas).expect("admit test atlas");
++        TestAtlas.remove(&key);
++        RejectingAtlas.remove(&key);
 +    }
 +
 +    #[cfg(target_os = "macos")]
@@ -3024,18 +3697,18 @@ index 5523b9c0e0..694bb0ac33 100644
      ///
      /// This is the headless analogue of presenting a frame: it performs the
 diff --git a/crates/gpui_macos/src/metal_renderer.rs b/crates/gpui_macos/src/metal_renderer.rs
-index 4f6b0fee78..ea16728cc3 100644
+index 4f6b0fee78..ccc5a95441 100644
 --- a/crates/gpui_macos/src/metal_renderer.rs
 +++ b/crates/gpui_macos/src/metal_renderer.rs
-@@ -7,7 +7,7 @@ use cocoa::{
-     quartzcore::AutoresizingMask,
+@@ -8,7 +8,7 @@ use cocoa::{
  };
  use gpui::{
--    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
-+    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point, Rgba,
-     PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+     AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
+-    PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
++    PrimitiveBatch, Rgba, ScaledPixels, Scene, Size, point, size,
  };
  #[cfg(any(test, feature = "test-support"))]
+ use image::RgbaImage;
 @@ -492,6 +492,22 @@ impl MetalRenderer {
          scene: &Scene,
          texture: &metal::TextureRef,

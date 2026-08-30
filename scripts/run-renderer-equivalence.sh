@@ -136,7 +136,7 @@ if [ "${ALPINE_ZED_MUTATION:-0}" = "1" ]; then
     # Intentional word splitting selects one optional Cargo feature argument pair.
     # shellcheck disable=SC2086
     cargo "+$zed_toolchain" mutants \
-        --manifest-path "$variant_checkout/Cargo.toml" \
+        --dir "$variant_checkout" \
         -p alpine_trace_adapter \
         --file 'crates/alpine_trace_adapter/src/lib.rs' \
         --file 'crates/alpine_trace_adapter/src/sequence.rs' \

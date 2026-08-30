@@ -222,4 +222,14 @@ if WORKFLOW_ROOT="$workflow_root" scripts/check-workflows.sh >/dev/null 2>&1; th
     exit 1
 fi
 
+mutation_block=$(sed -n '/^mutation_performed=false/,/^if \[ "$mode"/p' scripts/run-renderer-equivalence.sh)
+printf '%s\n' "$mutation_block" | grep -F -- '--dir "$variant_checkout"' >/dev/null || {
+    printf 'mutation runner does not bind cargo-mutants to the exact variant directory\n' >&2
+    exit 1
+}
+if printf '%s\n' "$mutation_block" | grep -F -- '--manifest-path' >/dev/null; then
+    printf 'mutation runner uses unsupported cargo-mutants manifest input\n' >&2
+    exit 1
+fi
+
 printf 'policy regression tests passed\n'
