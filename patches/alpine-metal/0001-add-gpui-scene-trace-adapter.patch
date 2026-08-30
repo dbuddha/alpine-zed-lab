@@ -5,7 +5,7 @@ index ccabb0bd88..aad37c1322 100644
 @@ -669,6 +669,16 @@ version = "0.2.21"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
+ 
 +[[package]]
 +name = "alpine_trace_adapter"
 +version = "0.0.0"
@@ -58,13 +58,16 @@ index 0000000000..faf168c68d
 +toml.workspace = true
 diff --git a/crates/alpine_trace_adapter/src/lib.rs b/crates/alpine_trace_adapter/src/lib.rs
 new file mode 100644
-index 0000000000..6ea1e3de27
+index 0000000000..633f3606dd
 --- /dev/null
 +++ b/crates/alpine_trace_adapter/src/lib.rs
-@@ -0,0 +1,866 @@
+@@ -0,0 +1,869 @@
 +//! GPL lab adapter from `alpine-scene-trace/v1` into pinned GPUI scenes.
 +
++mod sequence;
 +mod v2;
++
++pub use sequence::{SequenceReport, render_sequence_file};
 +
 +use std::{fs, io::ErrorKind, path::Path};
 +
@@ -930,13 +933,13 @@ index 0000000000..6ea1e3de27
 +}
 diff --git a/crates/alpine_trace_adapter/src/main.rs b/crates/alpine_trace_adapter/src/main.rs
 new file mode 100644
-index 0000000000..43323b263f
+index 0000000000..cdae1484c8
 --- /dev/null
 +++ b/crates/alpine_trace_adapter/src/main.rs
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,84 @@
 +use std::{env, path::Path, process::ExitCode};
 +
-+use alpine_trace_adapter::render_trace_file;
++use alpine_trace_adapter::{render_sequence_file, render_trace_file};
 +
 +fn main() -> ExitCode {
 +    match run() {
@@ -953,9 +956,35 @@ index 0000000000..43323b263f
 +
 +fn run() -> Result<String, String> {
 +    let mut arguments = env::args().skip(1);
-+    let trace_path = arguments
-+        .next()
-+        .ok_or_else(|| "expected TRACE OUTPUT arguments".to_owned())?;
++    let first = arguments.next().ok_or_else(|| {
++        "expected TRACE OUTPUT or --sequence MANIFEST ROOT OUTPUT arguments".to_owned()
++    })?;
++    if first == "--sequence" {
++        let manifest = arguments
++            .next()
++            .ok_or_else(|| "expected --sequence MANIFEST ROOT OUTPUT arguments".to_owned())?;
++        let root = arguments
++            .next()
++            .ok_or_else(|| "expected --sequence MANIFEST ROOT OUTPUT arguments".to_owned())?;
++        let output = arguments
++            .next()
++            .ok_or_else(|| "expected --sequence MANIFEST ROOT OUTPUT arguments".to_owned())?;
++        if arguments.next().is_some() {
++            return Err("expected exactly --sequence MANIFEST ROOT OUTPUT arguments".to_owned());
++        }
++        let report =
++            render_sequence_file(Path::new(&manifest), Path::new(&root), Path::new(&output))?;
++        return Ok(format!(
++            "schema=alpine-zed-gpui-atlas-lifecycle-run/v1 id={} visible_steps={} renderer_generations={} atlas_allocations={} atlas_replacements={} adaptation_timing_performed=false renderer_timing_performed=false memory_performed=false evidence={}",
++            report.id(),
++            report.visible_steps(),
++            report.renderer_generations(),
++            report.atlas_allocations(),
++            report.atlas_replacements(),
++            report.evidence_path().display(),
++        ));
++    }
++    let trace_path = first;
 +    let output_path = arguments
 +        .next()
 +        .ok_or_else(|| "expected TRACE OUTPUT arguments".to_owned())?;
@@ -992,12 +1021,939 @@ index 0000000000..43323b263f
 +        output_path
 +    ))
 +}
+diff --git a/crates/alpine_trace_adapter/src/sequence.rs b/crates/alpine_trace_adapter/src/sequence.rs
+new file mode 100644
+index 0000000000..8ab6ec44e7
+--- /dev/null
++++ b/crates/alpine_trace_adapter/src/sequence.rs
+@@ -0,0 +1,921 @@
++use std::{
++    fmt::Write as _,
++    fs,
++    path::{Component, Path, PathBuf},
++};
++
++use gpui::{AtlasKey, AtlasTextureKind, AtlasTile};
++use serde::Deserialize;
++
++use crate::{v2, write_readback};
++
++const SCHEMA: &str = "alpine-scene-trace-sequence/v1";
++const EVIDENCE_SCHEMA: &str = "alpine-zed-gpui-atlas-lifecycle-evidence/v1";
++const MAX_MANIFEST_BYTES: usize = 64 * 1024;
++const MAX_PATH_BYTES: usize = 4_096;
++const STEP_COUNT: usize = 6;
++
++#[derive(Clone, Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct SequenceManifest {
++    schema: String,
++    id: String,
++    task: u64,
++    comparison_level: String,
++    cpu_oracle_channel_tolerance: u8,
++    renderer_timing_performed: bool,
++    memory_claim_performed: bool,
++    steps: Vec<SequenceStep>,
++}
++
++#[derive(Clone, Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct SequenceStep {
++    sequence: u64,
++    transition: String,
++    renderer_generation: u64,
++    scene: Option<String>,
++    workload_hash: Option<String>,
++    resource_id: Option<String>,
++    resource_revision: Option<u64>,
++    atlas_width: Option<u32>,
++    atlas_height: Option<u32>,
++    content_hash: Option<String>,
++    expected_atlas_upload_bytes: usize,
++    expected_terminal_retained_bytes: usize,
++    expected_cpu_bytes: usize,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum Transition {
++    FullAdmission,
++    CompatibleReuse,
++    ContentReplacement,
++    CapacityReplacement,
++    Teardown,
++    FullResynchronization,
++}
++
++impl Transition {
++    const fn name(self) -> &'static str {
++        match self {
++            Self::FullAdmission => "full-admission",
++            Self::CompatibleReuse => "compatible-reuse",
++            Self::ContentReplacement => "content-replacement",
++            Self::CapacityReplacement => "capacity-replacement",
++            Self::Teardown => "teardown",
++            Self::FullResynchronization => "full-resynchronization",
++        }
++    }
++
++    const fn starts_generation(self) -> bool {
++        matches!(self, Self::FullAdmission | Self::FullResynchronization)
++    }
++
++    const fn is_replacement(self) -> bool {
++        matches!(self, Self::ContentReplacement | Self::CapacityReplacement)
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++struct AtlasIdentity {
++    id: String,
++    revision: u64,
++    width: u32,
++    height: u32,
++    content_hash: String,
++}
++
++struct ValidatedStep {
++    sequence: u64,
++    transition: Transition,
++    renderer_generation: u64,
++    scene_path: Option<String>,
++    workload_hash: Option<String>,
++    atlas: Option<AtlasIdentity>,
++    expected_atlas_upload_bytes: usize,
++    expected_terminal_retained_bytes: usize,
++    expected_cpu_bytes: usize,
++    prepared: Option<v2::PreparedTrace>,
++}
++
++struct ValidatedSequence {
++    id: String,
++    tolerance: u8,
++    steps: Vec<ValidatedStep>,
++}
++
++struct LiveAtlas {
++    key: AtlasKey,
++    tile: AtlasTile,
++    identity: AtlasIdentity,
++}
++
++/// Bounded summary of one completed GPUI atlas-lifecycle sequence.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct SequenceReport {
++    id: String,
++    visible_steps: usize,
++    renderer_generations: u64,
++    atlas_allocations: usize,
++    atlas_replacements: usize,
++    evidence_path: PathBuf,
++}
++
++impl SequenceReport {
++    /// Returns the immutable sequence identifier.
++    pub fn id(&self) -> &str {
++        &self.id
++    }
++    /// Returns the number of steps that produced a GPUI Metal readback.
++    pub const fn visible_steps(&self) -> usize {
++        self.visible_steps
++    }
++    /// Returns the number of independently owned renderer generations.
++    pub const fn renderer_generations(&self) -> u64 {
++        self.renderer_generations
++    }
++    /// Returns confirmed GPUI atlas builder admissions.
++    pub const fn atlas_allocations(&self) -> usize {
++        self.atlas_allocations
++    }
++    /// Returns explicit removals followed by replacement admissions.
++    pub const fn atlas_replacements(&self) -> usize {
++        self.atlas_replacements
++    }
++    /// Returns the retained evidence manifest path.
++    pub fn evidence_path(&self) -> &Path {
++        &self.evidence_path
++    }
++}
++
++/// Executes the canonical six-step atlas lifecycle through one pinned GPUI
++/// Metal owner per declared generation.
++pub fn render_sequence_file(
++    manifest_path: &Path,
++    repository_root: &Path,
++    output_dir: &Path,
++) -> Result<SequenceReport, String> {
++    fs::create_dir(output_dir).map_err(|error| {
++        format!(
++            "cannot create fresh sequence output {}: {error}",
++            output_dir.display()
++        )
++    })?;
++    let validated = load_validated(manifest_path, repository_root)?;
++    let evidence_path = output_dir.join("gpui-atlas-lifecycle.toml");
++    let mut evidence = format!(
++        "schema = {EVIDENCE_SCHEMA:?}\nsequence_schema = {SCHEMA:?}\nid = {:?}\ntask = 353\ncomparison_level = \"renderer-only\"\ncpu_oracle_channel_tolerance = {}\nrenderer_timing_performed = false\nmemory_claim_performed = false\ngpui_gpu_allocated_bytes_observed = false\ngpui_gpu_allocated_bytes_omission = \"The pinned public PlatformAtlas boundary exposes tile identity but not native Metal allocation bytes.\"\ngpui_terminal_retained_bytes_observed = false\ngpui_terminal_retained_bytes_omission = \"The pinned public headless renderer exposes no native completion or retained-byte snapshot.\"\n",
++        validated.id, validated.tolerance
++    );
++    let mut renderer: Option<Box<dyn gpui::PlatformHeadlessRenderer>> = None;
++    let mut live_atlas: Option<LiveAtlas> = None;
++    let mut allocations = 0_usize;
++    let mut replacements = 0_usize;
++    let mut visible_steps = 0_usize;
++
++    for step in &validated.steps {
++        if step.transition == Transition::Teardown {
++            if renderer.is_none() || live_atlas.is_none() {
++                return Err(
++                    "GPUI lifecycle teardown has no live renderer and atlas owner".to_owned(),
++                );
++            }
++            live_atlas = None;
++            renderer = None;
++            let _ = write!(
++                evidence,
++                "\n[[steps]]\nsequence = {}\ntransition = {:?}\nlogical_renderer_generation = {}\nscene_path = \"none\"\nworkload_hash = \"none\"\natlas_resource_id = \"none\"\natlas_revision = 0\natlas_width = 0\natlas_height = 0\natlas_content_hash = \"none\"\ngpui_texture_index = -1\ngpui_tile_id = -1\ngpui_tile_x = 0\ngpui_tile_y = 0\ngpui_tile_width = 0\ngpui_tile_height = 0\nadapter_atlas_admission_bytes = 0\nadapter_atlas_allocations = {}\nadapter_atlas_replacements = {}\nadapter_live_atlas_entries = 0\nrenderer_owner_live = false\nterminal_status = \"owner-released\"\nexpected_terminal_retained_bytes = {}\nreadback_path = \"none\"\nreadback_sha256 = \"none\"\nsemantic_execution_complete = true\n",
++                step.sequence,
++                step.transition.name(),
++                step.renderer_generation,
++                allocations,
++                replacements,
++                step.expected_terminal_retained_bytes,
++            );
++            continue;
++        }
++
++        if step.transition.starts_generation() {
++            if renderer.is_some() || live_atlas.is_some() {
++                return Err(
++                    "GPUI lifecycle attempted to start a generation while one was live".to_owned(),
++                );
++            }
++            renderer =
++                Some(gpui_platform::current_headless_renderer().ok_or_else(|| {
++                    "pinned GPUI headless Metal renderer is unavailable".to_owned()
++                })?);
++        }
++        let owner = renderer
++            .as_mut()
++            .ok_or_else(|| "GPUI lifecycle visible step has no renderer owner".to_owned())?;
++        let prepared = step
++            .prepared
++            .as_ref()
++            .ok_or_else(|| "GPUI lifecycle visible step has no prepared scene".to_owned())?;
++        let declared_atlas = step
++            .atlas
++            .as_ref()
++            .ok_or_else(|| "GPUI lifecycle visible step has no atlas identity".to_owned())?;
++
++        let (tile, step_allocations) = if step.transition == Transition::CompatibleReuse {
++            let current = live_atlas
++                .as_ref()
++                .ok_or_else(|| "GPUI compatible reuse has no prior atlas".to_owned())?;
++            if &current.identity != declared_atlas {
++                return Err("GPUI compatible reuse changed atlas identity".to_owned());
++            }
++            (current.tile, 0)
++        } else {
++            let platform_atlas = owner.sprite_atlas();
++            if step.transition.is_replacement() {
++                let prior = live_atlas
++                    .take()
++                    .ok_or_else(|| "GPUI atlas replacement has no prior allocation".to_owned())?;
++                platform_atlas.remove(&prior.key);
++                replacements = replacements
++                    .checked_add(1)
++                    .ok_or_else(|| "GPUI atlas replacement counter overflow".to_owned())?;
++            }
++            let (key, tile, admitted) = prepared.admit_atlas(platform_atlas.as_ref())?;
++            if admitted != 1 {
++                return Err("GPUI atlas transition reused an incompatible or stale key".to_owned());
++            }
++            allocations = allocations
++                .checked_add(admitted)
++                .ok_or_else(|| "GPUI atlas allocation counter overflow".to_owned())?;
++            live_atlas = Some(LiveAtlas {
++                key,
++                tile,
++                identity: declared_atlas.clone(),
++            });
++            (tile, admitted)
++        };
++
++        let admitted_bytes = if step_allocations == 0 {
++            0
++        } else {
++            declared_atlas
++                .width
++                .checked_mul(declared_atlas.height)
++                .and_then(|pixels| usize::try_from(pixels).ok())
++                .ok_or_else(|| "GPUI atlas admission byte count overflow".to_owned())?
++        };
++        if admitted_bytes != step.expected_atlas_upload_bytes {
++            return Err(format!(
++                "GPUI atlas step {} admitted {admitted_bytes} bytes, expected {}",
++                step.sequence, step.expected_atlas_upload_bytes
++            ));
++        }
++        let (scene, adaptation) = prepared.build_scene_with_tile(Some(tile), step_allocations)?;
++        let image = owner
++            .render_scene_to_image_with_clear(&scene, prepared.size(), prepared.clear_color())
++            .map_err(|error| format!("pinned GPUI lifecycle readback failed: {error:#}"))?;
++        let readback_name = format!("step-{}-gpui-metal.bgra", step.sequence);
++        let readback_path = output_dir.join(&readback_name);
++        write_readback(image.into_raw(), prepared.identity(), &readback_path)?;
++        let readback = fs::read(&readback_path).map_err(|error| {
++            format!(
++                "cannot retain GPUI lifecycle readback {}: {error}",
++                readback_path.display()
++            )
++        })?;
++        if readback.len() != step.expected_cpu_bytes {
++            return Err(format!(
++                "GPUI lifecycle step {} read back {} bytes, expected {}",
++                step.sequence,
++                readback.len(),
++                step.expected_cpu_bytes
++            ));
++        }
++        let atlas = live_atlas.as_ref().ok_or_else(|| {
++            "GPUI lifecycle lost its atlas before evidence publication".to_owned()
++        })?;
++        let texture_kind = match atlas.tile.texture_id.kind {
++            AtlasTextureKind::Monochrome => "monochrome",
++            _ => "unsupported",
++        };
++        if texture_kind != "monochrome" {
++            return Err("GPUI A8 lifecycle atlas was not admitted as monochrome".to_owned());
++        }
++        let _ = write!(
++            evidence,
++            "\n[[steps]]\nsequence = {}\ntransition = {:?}\nlogical_renderer_generation = {}\nscene_path = {:?}\nworkload_hash = {:?}\natlas_resource_id = {:?}\natlas_revision = {}\natlas_width = {}\natlas_height = {}\natlas_content_hash = {:?}\ngpui_texture_kind = {:?}\ngpui_texture_index = {}\ngpui_tile_id = {}\ngpui_tile_x = {}\ngpui_tile_y = {}\ngpui_tile_width = {}\ngpui_tile_height = {}\nadapter_atlas_admission_bytes = {}\nadapter_atlas_allocations = {}\nadapter_atlas_replacements = {}\nadapter_live_atlas_entries = 1\nrenderer_owner_live = true\nterminal_status = \"readback-complete\"\nexpected_terminal_retained_bytes = {}\nadaptation_operations = {}\nadaptation_quads = {}\nadaptation_glyphs = {}\nreadback_path = {:?}\nreadback_sha256 = {:?}\nsemantic_execution_complete = true\n",
++            step.sequence,
++            step.transition.name(),
++            step.renderer_generation,
++            step.scene_path.as_deref().expect("validated scene path"),
++            step.workload_hash
++                .as_deref()
++                .expect("validated workload hash"),
++            atlas.identity.id,
++            atlas.identity.revision,
++            atlas.identity.width,
++            atlas.identity.height,
++            atlas.identity.content_hash,
++            texture_kind,
++            atlas.tile.texture_id.index,
++            atlas.tile.tile_id.0,
++            atlas.tile.bounds.origin.x.0,
++            atlas.tile.bounds.origin.y.0,
++            atlas.tile.bounds.size.width.0,
++            atlas.tile.bounds.size.height.0,
++            admitted_bytes,
++            allocations,
++            replacements,
++            step.expected_terminal_retained_bytes,
++            adaptation.operation_count(),
++            adaptation.quad_count(),
++            adaptation.glyph_count(),
++            readback_name,
++            v2::sha256_hex(&readback),
++        );
++        visible_steps += 1;
++    }
++
++    live_atlas = None;
++    renderer = None;
++    let _ = (live_atlas, renderer);
++    let _ = write!(
++        evidence,
++        "\nfinal_renderer_owner_live = false\nfinal_adapter_live_atlas_entries = 0\nvisible_steps = {visible_steps}\nrenderer_generations = 2\nadapter_atlas_allocations = {allocations}\nadapter_atlas_replacements = {replacements}\nsequence_terminal = \"drained\"\n"
++    );
++    fs::write(&evidence_path, evidence).map_err(|error| {
++        format!(
++            "cannot write GPUI lifecycle evidence {}: {error}",
++            evidence_path.display()
++        )
++    })?;
++    Ok(SequenceReport {
++        id: validated.id,
++        visible_steps,
++        renderer_generations: 2,
++        atlas_allocations: allocations,
++        atlas_replacements: replacements,
++        evidence_path,
++    })
++}
++
++fn load_validated(manifest_path: &Path, root: &Path) -> Result<ValidatedSequence, String> {
++    let bytes = fs::read(manifest_path)
++        .map_err(|error| format!("cannot read {}: {error}", manifest_path.display()))?;
++    if bytes.len() > MAX_MANIFEST_BYTES {
++        return Err("trace sequence manifest exceeds the byte limit".to_owned());
++    }
++    let source = std::str::from_utf8(&bytes)
++        .map_err(|_| "trace sequence manifest is not UTF-8".to_owned())?;
++    let manifest: SequenceManifest = toml::from_str(source)
++        .map_err(|error| format!("cannot parse trace sequence manifest: {error}"))?;
++    if manifest.schema != SCHEMA
++        || !valid_slug(&manifest.id)
++        || manifest.task != 353
++        || manifest.comparison_level != "renderer-only"
++        || manifest.cpu_oracle_channel_tolerance > 1
++        || manifest.renderer_timing_performed
++        || manifest.memory_claim_performed
++    {
++        return Err("trace sequence policy identity is invalid".to_owned());
++    }
++    if manifest.steps.len() != STEP_COUNT {
++        return Err("trace sequence must contain the six canonical steps".to_owned());
++    }
++    let expected_transitions = [
++        Transition::FullAdmission,
++        Transition::CompatibleReuse,
++        Transition::ContentReplacement,
++        Transition::CapacityReplacement,
++        Transition::Teardown,
++        Transition::FullResynchronization,
++    ];
++    let expected_generations = [1_u64, 1, 1, 1, 1, 2];
++    let mut validated = Vec::with_capacity(STEP_COUNT);
++    for (index, step) in manifest.steps.into_iter().enumerate() {
++        let transition = parse_transition(&step.transition)?;
++        if step.sequence != index as u64
++            || transition != expected_transitions[index]
++            || step.renderer_generation != expected_generations[index]
++            || step.expected_terminal_retained_bytes != 0
++        {
++            return Err(format!("trace sequence step {index} identity is invalid"));
++        }
++        if transition == Transition::Teardown {
++            if step.scene.is_some()
++                || step.workload_hash.is_some()
++                || step.resource_id.is_some()
++                || step.resource_revision.is_some()
++                || step.atlas_width.is_some()
++                || step.atlas_height.is_some()
++                || step.content_hash.is_some()
++                || step.expected_atlas_upload_bytes != 0
++                || step.expected_cpu_bytes != 0
++            {
++                return Err("trace sequence teardown retained visible identity".to_owned());
++            }
++            validated.push(ValidatedStep {
++                sequence: step.sequence,
++                transition,
++                renderer_generation: step.renderer_generation,
++                scene_path: None,
++                workload_hash: None,
++                atlas: None,
++                expected_atlas_upload_bytes: 0,
++                expected_terminal_retained_bytes: 0,
++                expected_cpu_bytes: 0,
++                prepared: None,
++            });
++            continue;
++        }
++
++        let scene_path = step
++            .scene
++            .ok_or_else(|| format!("trace sequence step {index} lacks a scene"))?;
++        let scene_file = resolve_repository_path(root, &scene_path)?;
++        let scene_source = fs::read_to_string(&scene_file)
++            .map_err(|error| format!("cannot read {}: {error}", scene_file.display()))?;
++        let prepared = v2::decode(&scene_source)?;
++        let workload_hash = step
++            .workload_hash
++            .ok_or_else(|| format!("trace sequence step {index} lacks a workload hash"))?;
++        if workload_hash != prepared.identity().workload_hash() {
++            return Err(format!(
++                "trace sequence step {index} workload identity drifted"
++            ));
++        }
++        let prepared_atlas = prepared
++            .atlas()
++            .ok_or_else(|| format!("trace sequence step {index} has no A8 atlas"))?;
++        let atlas = AtlasIdentity {
++            id: step
++                .resource_id
++                .ok_or_else(|| format!("trace sequence step {index} lacks a resource id"))?,
++            revision: step
++                .resource_revision
++                .ok_or_else(|| format!("trace sequence step {index} lacks a resource revision"))?,
++            width: step
++                .atlas_width
++                .ok_or_else(|| format!("trace sequence step {index} lacks an atlas width"))?,
++            height: step
++                .atlas_height
++                .ok_or_else(|| format!("trace sequence step {index} lacks an atlas height"))?,
++            content_hash: step
++                .content_hash
++                .ok_or_else(|| format!("trace sequence step {index} lacks a content hash"))?,
++        };
++        if atlas.id != prepared_atlas.id
++            || atlas.revision != prepared_atlas.revision
++            || atlas.width != prepared_atlas.width
++            || atlas.height != prepared_atlas.height
++            || atlas.content_hash != prepared_atlas.content_hash
++        {
++            return Err(format!(
++                "trace sequence step {index} atlas identity drifted"
++            ));
++        }
++        let atlas_bytes = usize::try_from(atlas.width)
++            .ok()
++            .and_then(|width| {
++                usize::try_from(atlas.height)
++                    .ok()
++                    .and_then(|height| width.checked_mul(height))
++            })
++            .ok_or_else(|| format!("trace sequence step {index} atlas bytes overflow"))?;
++        let expected_upload = if transition == Transition::CompatibleReuse {
++            0
++        } else {
++            atlas_bytes
++        };
++        let expected_cpu_bytes = usize::try_from(prepared.identity().pixel_width())
++            .ok()
++            .and_then(|width| {
++                usize::try_from(prepared.identity().pixel_height())
++                    .ok()
++                    .and_then(|height| width.checked_mul(height))
++            })
++            .and_then(|pixels| pixels.checked_mul(4))
++            .ok_or_else(|| format!("trace sequence step {index} CPU bytes overflow"))?;
++        if step.expected_atlas_upload_bytes != expected_upload
++            || step.expected_cpu_bytes != expected_cpu_bytes
++        {
++            return Err(format!("trace sequence step {index} byte identity drifted"));
++        }
++        validated.push(ValidatedStep {
++            sequence: step.sequence,
++            transition,
++            renderer_generation: step.renderer_generation,
++            scene_path: Some(scene_path),
++            workload_hash: Some(workload_hash),
++            atlas: Some(atlas),
++            expected_atlas_upload_bytes: step.expected_atlas_upload_bytes,
++            expected_terminal_retained_bytes: step.expected_terminal_retained_bytes,
++            expected_cpu_bytes: step.expected_cpu_bytes,
++            prepared: Some(prepared),
++        });
++    }
++    validate_relationships(&validated)?;
++    Ok(ValidatedSequence {
++        id: manifest.id,
++        tolerance: manifest.cpu_oracle_channel_tolerance,
++        steps: validated,
++    })
++}
++
++fn validate_relationships(steps: &[ValidatedStep]) -> Result<(), String> {
++    let initial = visible_identity(&steps[0])?;
++    let reuse = visible_identity(&steps[1])?;
++    let content = visible_identity(&steps[2])?;
++    let capacity = visible_identity(&steps[3])?;
++    let resync = visible_identity(&steps[5])?;
++    if initial != reuse {
++        return Err("compatible reuse must preserve workload and atlas identity".to_owned());
++    }
++    if initial.1.id != content.1.id
++        || initial.1.width != content.1.width
++        || initial.1.height != content.1.height
++        || content.1.revision <= initial.1.revision
++        || content.1.content_hash == initial.1.content_hash
++    {
++        return Err("content replacement identity is incompatible".to_owned());
++    }
++    if content.1.id != capacity.1.id
++        || capacity.1.revision <= content.1.revision
++        || (content.1.width, content.1.height) == (capacity.1.width, capacity.1.height)
++    {
++        return Err("capacity replacement identity is incompatible".to_owned());
++    }
++    if capacity != resync {
++        return Err("full resynchronization must reconstruct the latest exact state".to_owned());
++    }
++    Ok(())
++}
++
++fn visible_identity(step: &ValidatedStep) -> Result<(&str, &AtlasIdentity), String> {
++    Ok((
++        step.workload_hash
++            .as_deref()
++            .ok_or_else(|| "visible sequence step lacks workload identity".to_owned())?,
++        step.atlas
++            .as_ref()
++            .ok_or_else(|| "visible sequence step lacks atlas identity".to_owned())?,
++    ))
++}
++
++fn resolve_repository_path(root: &Path, value: &str) -> Result<PathBuf, String> {
++    if value.len() > MAX_PATH_BYTES
++        || !value.starts_with("assurance/qualification/v2/")
++        || !value.ends_with(".toml")
++        || !value.bytes().all(|byte| {
++            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"/-_.".contains(&byte)
++        })
++    {
++        return Err(format!("trace sequence scene path {value:?} is invalid"));
++    }
++    let relative = Path::new(value);
++    if relative
++        .components()
++        .any(|component| !matches!(component, Component::Normal(_)))
++    {
++        return Err(format!("trace sequence scene path {value:?} is invalid"));
++    }
++    let canonical_root = fs::canonicalize(root)
++        .map_err(|error| format!("cannot canonicalize {}: {error}", root.display()))?;
++    let mut candidate = canonical_root.clone();
++    for component in relative.components() {
++        let Component::Normal(component) = component else {
++            return Err(format!("trace sequence scene path {value:?} is invalid"));
++        };
++        candidate.push(component);
++        let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
++            format!(
++                "cannot inspect trace sequence path {}: {error}",
++                candidate.display()
++            )
++        })?;
++        if metadata.file_type().is_symlink() {
++            return Err(format!(
++                "trace sequence scene path {} contains a symlink",
++                candidate.display()
++            ));
++        }
++    }
++    let canonical = fs::canonicalize(&candidate).map_err(|error| {
++        format!(
++            "cannot canonicalize trace sequence path {}: {error}",
++            candidate.display()
++        )
++    })?;
++    if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
++        return Err(format!(
++            "trace sequence scene path {value:?} is not a repository file"
++        ));
++    }
++    Ok(canonical)
++}
++
++fn parse_transition(value: &str) -> Result<Transition, String> {
++    match value {
++        "full-admission" => Ok(Transition::FullAdmission),
++        "compatible-reuse" => Ok(Transition::CompatibleReuse),
++        "content-replacement" => Ok(Transition::ContentReplacement),
++        "capacity-replacement" => Ok(Transition::CapacityReplacement),
++        "teardown" => Ok(Transition::Teardown),
++        "full-resynchronization" => Ok(Transition::FullResynchronization),
++        _ => Err(format!("unsupported trace sequence transition {value:?}")),
++    }
++}
++
++fn valid_slug(value: &str) -> bool {
++    !value.is_empty()
++        && value
++            .bytes()
++            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
++}
++
++#[cfg(test)]
++#[allow(
++    clippy::panic,
++    clippy::unwrap_used,
++    reason = "isolated protocol fixtures fail their owning test"
++)]
++mod tests {
++    use super::{STEP_COUNT, load_validated, render_sequence_file};
++    use crate::v2::{canonical_workload_hash, sha256_hex};
++    use std::{fs, path::PathBuf, process};
++
++    #[test]
++    fn validates_exact_lifecycle_and_rejects_step_drift() {
++        let fixture = Fixture::new("validation");
++        let validated = load_validated(&fixture.manifest, &fixture.root).expect("valid sequence");
++        assert_eq!(validated.steps.len(), STEP_COUNT);
++        assert_eq!(validated.steps[1].expected_atlas_upload_bytes, 0);
++        assert_eq!(validated.steps[3].expected_atlas_upload_bytes, 8);
++        fixture.rewrite(|source| source.replacen("sequence = 1", "sequence = 9", 1));
++        assert!(load_validated(&fixture.manifest, &fixture.root).is_err());
++    }
++
++    #[test]
++    fn rejects_missing_resync_stale_workload_and_unsafe_path() {
++        let fixture = Fixture::new("negative");
++        fixture.rewrite(|source| source.replacen(workload(&fixture.initial), &"a".repeat(64), 1));
++        assert!(load_validated(&fixture.manifest, &fixture.root).is_err());
++        fixture.restore();
++        fixture.rewrite(|source| {
++            source.replace("assurance/qualification/v2/initial.toml", "../initial.toml")
++        });
++        assert!(load_validated(&fixture.manifest, &fixture.root).is_err());
++        fixture.restore();
++        fixture.rewrite(|source| {
++            source
++                .split("[[steps]]")
++                .take(STEP_COUNT)
++                .collect::<Vec<_>>()
++                .join("[[steps]]")
++        });
++        assert!(load_validated(&fixture.manifest, &fixture.root).is_err());
++    }
++
++    #[cfg(target_os = "macos")]
++    #[test]
++    fn executes_two_gpui_generations_without_warm_reallocation() {
++        let fixture = Fixture::new("render");
++        let output = fixture.root.join("evidence");
++        let report = render_sequence_file(&fixture.manifest, &fixture.root, &output)
++            .expect("render lifecycle");
++        assert_eq!(report.visible_steps(), 5);
++        assert_eq!(report.renderer_generations(), 2);
++        assert_eq!(report.atlas_allocations(), 4);
++        assert_eq!(report.atlas_replacements(), 2);
++        let evidence = fs::read_to_string(report.evidence_path()).expect("read evidence");
++        assert!(evidence.contains("transition = \"compatible-reuse\""));
++        assert!(evidence.contains("adapter_atlas_admission_bytes = 0"));
++        assert!(evidence.contains("sequence_terminal = \"drained\""));
++    }
++
++    struct Fixture {
++        root: PathBuf,
++        manifest: PathBuf,
++        original: String,
++        initial: String,
++    }
++
++    impl Fixture {
++        fn new(name: &str) -> Self {
++            let root =
++                std::env::temp_dir().join(format!("alpine-gpui-sequence-{}-{name}", process::id()));
++            let _ = fs::remove_dir_all(&root);
++            let scenes = root.join("assurance/qualification/v2");
++            fs::create_dir_all(&scenes).expect("create scene directory");
++            let initial = trace_source("initial", 1, 2, 2, &[255, 0, 255, 0]);
++            let content = trace_source("content", 2, 2, 2, &[0, 255, 0, 255]);
++            let capacity = trace_source("capacity", 3, 4, 2, &[0, 255, 0, 255, 255, 0, 255, 0]);
++            fs::write(scenes.join("initial.toml"), &initial).expect("write initial");
++            fs::write(scenes.join("content.toml"), &content).expect("write content");
++            fs::write(scenes.join("capacity.toml"), &capacity).expect("write capacity");
++            let original = manifest_source(&initial, &content, &capacity);
++            let manifest = root.join("atlas-lifecycle.toml");
++            fs::write(&manifest, &original).expect("write manifest");
++            Self {
++                root,
++                manifest,
++                original,
++                initial,
++            }
++        }
++        fn rewrite(&self, rewrite: impl FnOnce(String) -> String) {
++            fs::write(&self.manifest, rewrite(self.original.clone())).expect("rewrite manifest");
++        }
++        fn restore(&self) {
++            fs::write(&self.manifest, &self.original).expect("restore manifest");
++        }
++    }
++    impl Drop for Fixture {
++        fn drop(&mut self) {
++            let _ = fs::remove_dir_all(&self.root);
++        }
++    }
++
++    fn trace_source(id: &str, revision: u64, width: u32, height: u32, pixels: &[u8]) -> String {
++        let content_hash = sha256_hex(pixels);
++        let pixel_list = pixels
++            .iter()
++            .map(u8::to_string)
++            .collect::<Vec<_>>()
++            .join(", ");
++        rebind(format!(
++            r#"schema = "alpine-scene-trace/v2"
++id = "{id}"
++workload_hash = "{}"
++revision = {revision}
++clear_color = [0.1, 0.2, 0.3, 1.0]
++
++[viewport]
++width = 4.0
++height = 2.0
++scale_factor = 1.0
++pixel_width = 4
++pixel_height = 2
++
++[[resources]]
++id = "editor-atlas"
++kind = "a8-atlas"
++content_hash = "{content_hash}"
++revision = {revision}
++width = {width}
++height = {height}
++pixels = [{pixel_list}]
++
++[[clips]]
++id = "viewport"
++x = 0.0
++y = 0.0
++width = 4.0
++height = 2.0
++
++[[operations]]
++sequence = 0
++kind = "monochrome-glyph"
++resource = "editor-atlas"
++clip = "viewport"
++x = 0.0
++y = 0.0
++width = 1.0
++height = 1.0
++red = 1.0
++green = 1.0
++blue = 1.0
++alpha = 1.0
++atlas_x = 0
++atlas_y = 0
++atlas_width = 1
++atlas_height = 1
++"#,
++            "0".repeat(64)
++        ))
++    }
++
++    fn rebind(source: String) -> String {
++        let hash = canonical_workload_hash(&source).expect("canonical workload");
++        source.replace(
++            &format!("workload_hash = \"{}\"", "0".repeat(64)),
++            &format!("workload_hash = \"{hash}\""),
++        )
++    }
++    fn field<'a>(source: &'a str, prefix: &str) -> &'a str {
++        source
++            .lines()
++            .find_map(|line| line.strip_prefix(prefix)?.strip_suffix('"'))
++            .expect("field")
++    }
++    fn workload(source: &str) -> &str {
++        field(source, "workload_hash = \"")
++    }
++    fn content(source: &str) -> &str {
++        field(source, "content_hash = \"")
++    }
++
++    fn manifest_source(initial: &str, changed: &str, capacity: &str) -> String {
++        format!(
++            r#"schema = "alpine-scene-trace-sequence/v1"
++id = "editor-atlas-lifecycle"
++task = 353
++comparison_level = "renderer-only"
++cpu_oracle_channel_tolerance = 1
++renderer_timing_performed = false
++memory_claim_performed = false
++
++[[steps]]
++sequence = 0
++transition = "full-admission"
++renderer_generation = 1
++scene = "assurance/qualification/v2/initial.toml"
++workload_hash = "{}"
++resource_id = "editor-atlas"
++resource_revision = 1
++atlas_width = 2
++atlas_height = 2
++content_hash = "{}"
++expected_atlas_upload_bytes = 4
++expected_terminal_retained_bytes = 0
++expected_cpu_bytes = 32
++
++[[steps]]
++sequence = 1
++transition = "compatible-reuse"
++renderer_generation = 1
++scene = "assurance/qualification/v2/initial.toml"
++workload_hash = "{}"
++resource_id = "editor-atlas"
++resource_revision = 1
++atlas_width = 2
++atlas_height = 2
++content_hash = "{}"
++expected_atlas_upload_bytes = 0
++expected_terminal_retained_bytes = 0
++expected_cpu_bytes = 32
++
++[[steps]]
++sequence = 2
++transition = "content-replacement"
++renderer_generation = 1
++scene = "assurance/qualification/v2/content.toml"
++workload_hash = "{}"
++resource_id = "editor-atlas"
++resource_revision = 2
++atlas_width = 2
++atlas_height = 2
++content_hash = "{}"
++expected_atlas_upload_bytes = 4
++expected_terminal_retained_bytes = 0
++expected_cpu_bytes = 32
++
++[[steps]]
++sequence = 3
++transition = "capacity-replacement"
++renderer_generation = 1
++scene = "assurance/qualification/v2/capacity.toml"
++workload_hash = "{}"
++resource_id = "editor-atlas"
++resource_revision = 3
++atlas_width = 4
++atlas_height = 2
++content_hash = "{}"
++expected_atlas_upload_bytes = 8
++expected_terminal_retained_bytes = 0
++expected_cpu_bytes = 32
++
++[[steps]]
++sequence = 4
++transition = "teardown"
++renderer_generation = 1
++expected_atlas_upload_bytes = 0
++expected_terminal_retained_bytes = 0
++expected_cpu_bytes = 0
++
++[[steps]]
++sequence = 5
++transition = "full-resynchronization"
++renderer_generation = 2
++scene = "assurance/qualification/v2/capacity.toml"
++workload_hash = "{}"
++resource_id = "editor-atlas"
++resource_revision = 3
++atlas_width = 4
++atlas_height = 2
++content_hash = "{}"
++expected_atlas_upload_bytes = 8
++expected_terminal_retained_bytes = 0
++expected_cpu_bytes = 32
++"#,
++            workload(initial),
++            content(initial),
++            workload(initial),
++            content(initial),
++            workload(changed),
++            content(changed),
++            workload(capacity),
++            content(capacity),
++            workload(capacity),
++            content(capacity)
++        )
++    }
++}
 diff --git a/crates/alpine_trace_adapter/src/v2.rs b/crates/alpine_trace_adapter/src/v2.rs
 new file mode 100644
-index 0000000000..1b23a17c82
+index 0000000000..682e732598
 --- /dev/null
 +++ b/crates/alpine_trace_adapter/src/v2.rs
-@@ -0,0 +1,982 @@
+@@ -0,0 +1,1045 @@
 +use std::{
 +    borrow::Cow,
 +    collections::{BTreeMap, BTreeSet},
@@ -1114,19 +2070,101 @@ index 0000000000..1b23a17c82
 +    })
 +}
 +
-+struct PreparedTrace {
++pub(crate) struct PreparedTrace {
 +    trace: Trace,
 +    size: Size<DevicePixels>,
 +    identity: TraceIdentity,
 +}
 +
++#[derive(Clone, Copy)]
++pub(crate) struct PreparedAtlas<'a> {
++    pub(crate) id: &'a str,
++    pub(crate) revision: u64,
++    pub(crate) width: u32,
++    pub(crate) height: u32,
++    pub(crate) content_hash: &'a str,
++    pub(crate) pixels: &'a [u8],
++}
++
++impl PreparedAtlas<'_> {
++    pub(crate) fn key(self) -> AtlasKey {
++        AtlasKey::Svg(RenderSvgParams {
++            path: format!("alpine-prepared-a8/{}", self.content_hash).into(),
++            size: self.size(),
++        })
++    }
++
++    pub(crate) fn size(self) -> Size<DevicePixels> {
++        size(
++            DevicePixels(self.width as i32),
++            DevicePixels(self.height as i32),
++        )
++    }
++}
++
 +impl PreparedTrace {
-+    fn clear_color(&self) -> Rgba {
++    pub(crate) fn clear_color(&self) -> Rgba {
 +        let [r, g, b, a] = self.trace.clear_color;
 +        Rgba { r, g, b, a }
 +    }
 +
++    pub(crate) const fn size(&self) -> Size<DevicePixels> {
++        self.size
++    }
++
++    pub(crate) const fn identity(&self) -> &TraceIdentity {
++        &self.identity
++    }
++
++    pub(crate) fn atlas(&self) -> Option<PreparedAtlas<'_>> {
++        self.trace.resources.first().map(|resource| PreparedAtlas {
++            id: resource.id.as_str(),
++            revision: resource.revision.expect("validated resource revision"),
++            width: resource.width.expect("validated resource width"),
++            height: resource.height.expect("validated resource height"),
++            content_hash: resource.content_hash.as_str(),
++            pixels: resource
++                .pixels
++                .as_deref()
++                .expect("validated resource pixels"),
++        })
++    }
++
++    pub(crate) fn admit_atlas(
++        &self,
++        atlas: &dyn PlatformAtlas,
++    ) -> Result<(AtlasKey, AtlasTile, usize), String> {
++        let resource = self
++            .atlas()
++            .ok_or_else(|| "prepared scene has no A8 atlas to admit".to_owned())?;
++        let key = resource.key();
++        let mut allocated = false;
++        let mut build = || {
++            allocated = true;
++            Ok(Some((resource.size(), Cow::Borrowed(resource.pixels))))
++        };
++        let tile = atlas
++            .get_or_insert_with(&key, &mut build)
++            .map_err(|error| format!("GPUI atlas admission failed: {error:#}"))?
++            .ok_or_else(|| "GPUI atlas rejected the prepared A8 resource".to_owned())?;
++        Ok((key, tile, usize::from(allocated)))
++    }
++
 +    fn build_scene(&self, atlas: &dyn PlatformAtlas) -> Result<(Scene, AdaptationReport), String> {
++        let (tile, allocations) = if self.atlas().is_some() {
++            let (_, tile, allocations) = self.admit_atlas(atlas)?;
++            (Some(tile), allocations)
++        } else {
++            (None, 0)
++        };
++        self.build_scene_with_tile(tile, allocations)
++    }
++
++    pub(crate) fn build_scene_with_tile(
++        &self,
++        atlas_tile: Option<AtlasTile>,
++        atlas_allocations: usize,
++    ) -> Result<(Scene, AdaptationReport), String> {
 +        let scale = self.trace.viewport.scale_factor;
 +        let viewport = scaled_bounds(
 +            [
@@ -1147,29 +2185,10 @@ index 0000000000..1b23a17c82
 +            })
 +            .collect::<Result<BTreeMap<_, _>, _>>()?;
 +
-+        let (atlas_resource, atlas_tile, atlas_allocations) =
-+            if let Some(resource) = self.trace.resources.first() {
-+                let width = resource.width.expect("validated resource width");
-+                let height = resource.height.expect("validated resource height");
-+                let pixels = resource.pixels.as_ref().expect("validated resource pixels");
-+                let atlas_size = size(DevicePixels(width as i32), DevicePixels(height as i32));
-+                let key = AtlasKey::Svg(RenderSvgParams {
-+                    path: format!("alpine-prepared-a8/{}", resource.content_hash).into(),
-+                    size: atlas_size,
-+                });
-+                let mut allocated = false;
-+                let mut build = || {
-+                    allocated = true;
-+                    Ok(Some((atlas_size, Cow::Borrowed(pixels.as_slice()))))
-+                };
-+                let tile = atlas
-+                    .get_or_insert_with(&key, &mut build)
-+                    .map_err(|error| format!("GPUI atlas admission failed: {error:#}"))?
-+                    .ok_or_else(|| "GPUI atlas rejected the prepared A8 resource".to_owned())?;
-+                (Some(resource), Some(tile), if allocated { 1 } else { 0 })
-+            } else {
-+                (None, None, 0)
-+            };
++        let atlas_resource = self.trace.resources.first();
++        if atlas_resource.is_some() != atlas_tile.is_some() {
++            return Err("prepared atlas resource and admitted GPUI tile disagree".to_owned());
++        }
 +
 +        let mut scene = Scene::default();
 +        let mut quad_count = 0;
@@ -1243,7 +2262,7 @@ index 0000000000..1b23a17c82
 +    }
 +}
 +
-+fn decode(source: &str) -> Result<PreparedTrace, String> {
++pub(crate) fn decode(source: &str) -> Result<PreparedTrace, String> {
 +    let trace: Trace = toml::from_str(source)
 +        .map_err(|error| format!("cannot parse alpine-scene-trace/v2: {error}"))?;
 +    validate(source, &trace)?;
@@ -1501,7 +2520,7 @@ index 0000000000..1b23a17c82
 +    ]
 +}
 +
-+fn canonical_workload_hash(source: &str) -> Result<String, String> {
++pub(crate) fn canonical_workload_hash(source: &str) -> Result<String, String> {
 +    let mut found = false;
 +    let mut canonical = Vec::with_capacity(source.len());
 +    for line in source.split_inclusive('\n') {
@@ -1520,7 +2539,7 @@ index 0000000000..1b23a17c82
 +    Ok(sha256_hex(&canonical))
 +}
 +
-+fn sha256_hex(bytes: &[u8]) -> String {
++pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 +    const INITIAL: [u32; 8] = [
 +        0x6a09_e667,
 +        0xbb67_ae85,
@@ -1987,7 +3006,7 @@ index 5523b9c0e0..694bb0ac33 100644
 @@ -979,6 +979,19 @@ pub trait PlatformHeadlessRenderer {
          size: Size<DevicePixels>,
      ) -> Result<RgbaImage>;
-
+ 
 +    /// Render a scene with an explicit clear color and return an RGBA image.
 +    ///
 +    /// Comparator adapters use this test-support boundary to preserve prepared
@@ -2046,7 +3065,7 @@ index 4f6b0fee78..ea16728cc3 100644
              viewport_size,
 +            clear_color,
          )?;
-
+ 
          let instance_buffer_pool = self.instance_buffer_pool.clone();
 @@ -570,6 +587,26 @@ impl MetalRenderer {
          &mut self,
@@ -2078,7 +3097,7 @@ index 4f6b0fee78..ea16728cc3 100644
 @@ -588,7 +625,17 @@ impl MetalRenderer {
          texture_descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
          let target_texture = self.device.new_texture(&texture_descriptor);
-
+ 
 -        let command_buffer = self.render_frame(scene, &target_texture, size)?;
 +        let command_buffer = self.render_frame_with_clear(
 +            scene,
@@ -2091,7 +3110,7 @@ index 4f6b0fee78..ea16728cc3 100644
 +                clear_color.a.into(),
 +            ),
 +        )?;
-
+ 
          // On discrete GPUs (non-unified memory), Managed textures require an
          // explicit blit synchronize before the CPU can read back the rendered
 @@ -655,16 +702,15 @@ impl MetalRenderer {
@@ -2111,12 +3130,12 @@ index 4f6b0fee78..ea16728cc3 100644
 -            Some(metal::MTLClearColor::new(0., 0., 0., alpha)),
 +            Some(clear_color),
          );
-
+ 
          for batch in scene.batches() {
 @@ -1616,6 +1662,16 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
          self.renderer.render_scene_to_image(scene, size)
      }
-
+ 
 +    fn render_scene_to_image_with_clear(
 +        &mut self,
 +        scene: &Scene,

@@ -13,7 +13,7 @@ license obligations.
 
 The lab pins Zed `v1.15.0` at
 `e17dc4f9d50db73a458b64dcce50ecd4878b98a3` and Alpine at
-`1b6d16e6ddc120a7670fc225913dad9908dd482c`. It establishes source isolation,
+`665beaa69adb80c6bf34de911aefa6e874813ae1`. It establishes source isolation,
 license checks, an immutable eight-fixture trace manifest, and reviewed
 patch-series checks. The GPL adapter preserves the version 1 solid-quad control
 and independently decodes version 2 clips, quads, one prepared A8 atlas,
@@ -24,6 +24,16 @@ rasterization and adds no synthetic background draw. Pull requests and the
 weekly schedule run coverage ratchets and exhaustive adapter mutation testing.
 Renderer-only timing and memory remain disabled until semantic equivalence,
 offline-shader CI, and hardware calibration qualify them.
+
+The pinned companion `alpine-scene-trace-sequence/v1` now exercises initial
+atlas admission, unchanged reuse, same-capacity content replacement, capacity
+replacement, teardown, and full resynchronization through two GPUI Metal owner
+generations. Warm reuse bypasses GPUI atlas admission. Replacement explicitly
+removes the prior key before admitting the new immutable bytes. Evidence keeps
+tile identity, adapter allocation and replacement counts, CPU-oracle deltas,
+and terminal owner state. GPUI's public headless boundary does not expose native
+Metal allocation bytes or completion residency, so those fields remain an
+explicit omission rather than an inferred memory claim.
 
 Every accepted qualification manifest records the clean lab revision that
 generated it alongside the exact Zed and Alpine revisions. Runs from a lab
@@ -91,12 +101,16 @@ ALPINE_ZED_RUNTIME_SHADERS=1 scripts/run-renderer-equivalence.sh artifacts/local
 
 Runtime shader mode is supporting evidence only and is marked unqualified in
 the generated manifests. A passing set establishes CPU-oracle agreement within
-one BGRA8 channel unit for the eight pinned prepared scenes. A full physical run
-also requires Alpine Direct Metal and GPUI Metal to be byte-identical. Every
+one BGRA8 channel unit for the eight pinned prepared scenes and all five visible
+atlas-lifecycle steps. A full physical run also executes Alpine's independently
+validated Direct Metal lifecycle sequence and requires the eight static Alpine
+Direct Metal and GPUI Metal readbacks to be byte-identical. Every
 fixture retains its CPU, GPUI Metal, and, when physically run, Alpine Direct
 Metal readback plus the observed oracle delta, adaptation counters, and pair
-identity. It does not establish full primitive coverage, lifecycle or resource
-equivalence, application parity, timing, memory, or superiority.
+identity. Lifecycle evidence establishes bounded adapter admissions, GPUI tile
+identity, teardown, reconstruction, and pixel equivalence. It does not establish
+native GPUI allocation-byte equivalence, full primitive coverage, application
+parity, timing, memory, or superiority.
 
 To reproduce the source-assurance gates locally, install the pinned
 `cargo-llvm-cov` and `cargo-mutants` versions shown in CI, then run:
@@ -123,6 +137,7 @@ production target.
 
 - Alpine Capability: <https://github.com/dbuddha/alpine-gpui/issues/28>
 - Lab Requirement: <https://github.com/dbuddha/alpine-gpui/issues/31>
+- Atlas lifecycle qualification: <https://github.com/dbuddha/alpine-gpui/issues/353>
 - Foundation Task: <https://github.com/dbuddha/alpine-gpui/issues/43>
 - GPUI trace Task: <https://github.com/dbuddha/alpine-gpui/issues/61>
 - Pinned research: <https://github.com/dbuddha/alpine-gpui/issues/27>

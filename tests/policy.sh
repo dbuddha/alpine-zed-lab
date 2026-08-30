@@ -14,7 +14,7 @@ cp pins/alpine.toml "$test_dir/alpine.toml"
 cp pins/alpine-traces.tsv "$test_dir/alpine-traces.tsv"
 ALPINE_PIN_FILE="$test_dir/alpine.toml" scripts/check-alpine-pin.sh >/dev/null
 
-sed 's/1b6d16e6ddc120a7670fc225913dad9908dd482c/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
+sed 's/665beaa69adb80c6bf34de911aefa6e874813ae1/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
 if ALPINE_PIN_FILE="$test_dir/invalid-alpine-commit.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
     printf 'invalid Alpine commit fixture unexpectedly passed\n' >&2
     exit 1
@@ -33,6 +33,12 @@ if ALPINE_PIN_FILE="$test_dir/unsafe-alpine-path.toml" scripts/check-alpine-pin.
     exit 1
 fi
 
+sed 's|sequence_manifest_path = "assurance/qualification/sequences/atlas-lifecycle-v1.toml"|sequence_manifest_path = "../sequence.toml"|' pins/alpine.toml > "$test_dir/unsafe-alpine-sequence-path.toml"
+if ALPINE_PIN_FILE="$test_dir/unsafe-alpine-sequence-path.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
+    printf 'unsafe Alpine sequence manifest path unexpectedly passed\n' >&2
+    exit 1
+fi
+
 cp pins/alpine-traces.tsv "$test_dir/corrupt-alpine-traces.tsv"
 printf 'unreviewed\n' >> "$test_dir/corrupt-alpine-traces.tsv"
 if ALPINE_TRACE_MANIFEST_FILE="$test_dir/corrupt-alpine-traces.tsv" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
@@ -43,6 +49,12 @@ fi
 sed 's/afa696780de42292510c3b19bd60602149455fd921ceefc3f6e7f0dcf00b67d4/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' pins/alpine.toml > "$test_dir/wrong-alpine-manifest-hash.toml"
 if ALPINE_PIN_FILE="$test_dir/wrong-alpine-manifest-hash.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
     printf 'wrong Alpine trace manifest fingerprint unexpectedly passed\n' >&2
+    exit 1
+fi
+
+sed 's/12c6a78b4baf93735158cac39cb5b4cf709df42cd30b650b9563c9ec37956e0b/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' pins/alpine.toml > "$test_dir/wrong-alpine-sequence-hash.toml"
+if ALPINE_PIN_FILE="$test_dir/wrong-alpine-sequence-hash.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
+    printf 'wrong Alpine sequence manifest fingerprint unexpectedly passed\n' >&2
     exit 1
 fi
 

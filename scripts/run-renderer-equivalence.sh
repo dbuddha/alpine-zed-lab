@@ -37,9 +37,12 @@ PIN_FILE=pins/alpine.toml
 alpine_commit=$(pin_value commit)
 trace_manifest_path=$(pin_value trace_manifest_path)
 trace_manifest_sha256=$(pin_value trace_manifest_sha256)
+sequence_manifest_path=$(pin_value sequence_manifest_path)
+sequence_manifest_sha256=$(pin_value sequence_manifest_sha256)
 unset PIN_FILE
 
 trace_manifest="$repo_root/$trace_manifest_path"
+sequence_manifest="$repo_root/.lab/alpine/$sequence_manifest_path"
 output_absolute="$repo_root/$output_dir"
 mkdir -p "$output_absolute"
 
@@ -136,6 +139,7 @@ if [ "${ALPINE_ZED_MUTATION:-0}" = "1" ]; then
         --manifest-path "$variant_checkout/Cargo.toml" \
         -p alpine_trace_adapter \
         --file 'crates/alpine_trace_adapter/src/lib.rs' \
+        --file 'crates/alpine_trace_adapter/src/sequence.rs' \
         --jobs 4 \
         --minimum-test-timeout 20 \
         --output "$output_absolute/mutation" \
@@ -319,6 +323,164 @@ EOF
 done < "$trace_manifest"
 
 [ "$fixture_count" -eq 8 ] || { printf 'renderer set must execute eight fixtures\n' >&2; exit 1; }
+
+sequence_dir="$output_absolute/atlas-lifecycle"
+mkdir -p "$sequence_dir"
+(
+    cd "$repo_root/.lab/alpine"
+    CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo run \
+        --manifest-path Cargo.toml \
+        --locked \
+        -p alpine-assurance \
+        -- validate-trace-sequence "$sequence_manifest_path" \
+        > "$sequence_dir/alpine-sequence-validation.log"
+)
+if [ "$mode" = full ]; then
+    (
+        cd "$repo_root/.lab/alpine"
+        CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo run \
+            --manifest-path Cargo.toml \
+            --locked \
+            -p alpine-assurance \
+            -- render-trace-sequence-native \
+            "$sequence_manifest_path" \
+            "$sequence_dir/alpine-metal-lifecycle.toml" \
+            > "$sequence_dir/alpine-metal-lifecycle.log"
+    )
+    alpine_sequence_sha256=$(shasum -a 256 "$sequence_dir/alpine-metal-lifecycle.toml" | awk '{ print $1 }')
+else
+    alpine_sequence_sha256=not-run
+fi
+# Intentional word splitting selects one optional Cargo feature argument pair.
+# shellcheck disable=SC2086
+CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" run \
+    --manifest-path "$variant_checkout/Cargo.toml" \
+    --locked \
+    -p alpine_trace_adapter \
+    $feature_arguments \
+    -- --sequence "$sequence_manifest" "$repo_root/.lab/alpine" "$sequence_dir/gpui" \
+    > "$sequence_dir/gpui-atlas-lifecycle.log"
+
+[ "$(adapter_value visible_steps "$sequence_dir/gpui-atlas-lifecycle.log")" = 5 ] || { printf 'GPUI lifecycle visible-step count drifted\n' >&2; exit 1; }
+[ "$(adapter_value renderer_generations "$sequence_dir/gpui-atlas-lifecycle.log")" = 2 ] || { printf 'GPUI lifecycle renderer-generation count drifted\n' >&2; exit 1; }
+[ "$(adapter_value atlas_allocations "$sequence_dir/gpui-atlas-lifecycle.log")" = 4 ] || { printf 'GPUI lifecycle allocation count drifted\n' >&2; exit 1; }
+[ "$(adapter_value atlas_replacements "$sequence_dir/gpui-atlas-lifecycle.log")" = 2 ] || { printf 'GPUI lifecycle replacement count drifted\n' >&2; exit 1; }
+
+gpui_sequence_evidence="$sequence_dir/gpui/gpui-atlas-lifecycle.toml"
+[ -f "$gpui_sequence_evidence" ] || { printf 'GPUI lifecycle evidence is missing\n' >&2; exit 1; }
+sequence_rows="$sequence_dir/.gpui-steps.tsv"
+awk -F ' = ' '
+    function clean(value) { gsub(/^"|"$/, "", value); return value }
+    function emit() {
+        if (active) print sequence "\t" transition "\t" scene "\t" workload "\t" readback
+    }
+    /^\[\[steps\]\]$/ { emit(); active = 1; sequence = transition = scene = workload = readback = ""; next }
+    active && $1 == "sequence" { sequence = $2; next }
+    active && $1 == "transition" { transition = clean($2); next }
+    active && $1 == "scene_path" { scene = clean($2); next }
+    active && $1 == "workload_hash" { workload = clean($2); next }
+    active && $1 == "readback_path" { readback = clean($2); next }
+    END { emit() }
+' "$gpui_sequence_evidence" > "$sequence_rows"
+[ "$(wc -l < "$sequence_rows" | tr -d ' ')" -eq 6 ] || { printf 'GPUI lifecycle evidence must contain six ordered steps\n' >&2; exit 1; }
+
+gpui_sequence_sha256=$(shasum -a 256 "$gpui_sequence_evidence" | awk '{ print $1 }')
+sequence_qualification_tmp="$sequence_dir/.qualification.toml.tmp"
+cat > "$sequence_qualification_tmp" <<EOF
+schema = "alpine-renderer-atlas-lifecycle-equivalence/v1"
+state = "$state"
+comparison_level = "renderer-only"
+lab_revision = "$lab_revision"
+zed_revision = "$zed_commit"
+alpine_revision = "$alpine_commit"
+sequence_manifest_path = "$sequence_manifest_path"
+sequence_manifest_sha256 = "$sequence_manifest_sha256"
+gpui_sequence_evidence_sha256 = "$gpui_sequence_sha256"
+alpine_sequence_evidence_sha256 = "$alpine_sequence_sha256"
+visible_steps = 5
+renderer_generations = 2
+adapter_atlas_allocations = 4
+adapter_atlas_replacements = 2
+cpu_oracle_channel_tolerance = 1
+cpu_oracle_equivalence_within_tolerance_all = true
+direct_metal_performed = $direct_metal_performed
+adaptation_timing_performed = false
+renderer_timing_performed = false
+memory_performed = false
+performance_qualified = false
+generated_at_utc = "$generated_at_utc"
+EOF
+
+sequence_count=0
+sequence_visible_count=0
+while IFS="$tab" read -r sequence transition scene_path workload_hash readback_path; do
+    case "$sequence:$transition" in
+        0:full-admission|1:compatible-reuse|2:content-replacement|3:capacity-replacement|4:teardown|5:full-resynchronization) ;;
+        *) printf 'GPUI lifecycle step identity drifted: %s:%s\n' "$sequence" "$transition" >&2; exit 1 ;;
+    esac
+    if [ "$transition" = teardown ]; then
+        [ "$scene_path" = none ] && [ "$workload_hash" = none ] && [ "$readback_path" = none ] || { printf 'GPUI teardown retained visible evidence\n' >&2; exit 1; }
+        cat >> "$sequence_qualification_tmp" <<EOF
+
+[[steps]]
+sequence = $sequence
+transition = "$transition"
+scene_path = "none"
+workload_hash = "none"
+expected_cpu_bytes = 0
+cpu_oracle_sha256 = "none"
+gpui_metal_sha256 = "none"
+cpu_oracle_max_observed_channel_delta = 0
+semantic_and_pixel_equivalent = true
+EOF
+    else
+        case "$scene_path" in assurance/qualification/v2/*.toml) ;; *) printf 'unsafe GPUI lifecycle scene path: %s\n' "$scene_path" >&2; exit 1 ;; esac
+        case "$readback_path" in step-[0-9]-gpui-metal.bgra) ;; *) printf 'unsafe GPUI lifecycle readback path: %s\n' "$readback_path" >&2; exit 1 ;; esac
+        scene="$repo_root/.lab/alpine/$scene_path"
+        declared_workload=$(sed -nE 's/^workload_hash = "([0-9a-f]{64})"$/\1/p' "$scene")
+        [ "$declared_workload" = "$workload_hash" ] || { printf 'GPUI lifecycle workload drifted at step %s\n' "$sequence" >&2; exit 1; }
+        cpu_readback="$sequence_dir/step-$sequence-cpu-oracle.bgra"
+        CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo run \
+            --manifest-path "$repo_root/.lab/alpine/Cargo.toml" \
+            --locked \
+            -p alpine-assurance \
+            -- render-scene-reference "$scene" "$cpu_readback" \
+            > "$sequence_dir/step-$sequence-cpu-oracle.log"
+        pixel_width=$(sed -nE 's/^pixel_width = ([0-9]+)$/\1/p' "$scene")
+        pixel_height=$(sed -nE 's/^pixel_height = ([0-9]+)$/\1/p' "$scene")
+        [ -n "$pixel_width" ] && [ -n "$pixel_height" ] || { printf 'lifecycle scene lacks exact dimensions at step %s\n' "$sequence" >&2; exit 1; }
+        expected_bytes=$((pixel_width * pixel_height * 4))
+        scripts/compare-readbacks.sh --max-channel-delta 1 \
+            "$expected_bytes" \
+            "$cpu_readback" \
+            "$sequence_dir/gpui/$readback_path" \
+            > "$sequence_dir/step-$sequence-equivalence.log"
+        max_delta=$(sed -nE 's/.*max_observed_channel_delta=([0-9]+).*/\1/p' "$sequence_dir/step-$sequence-equivalence.log")
+        case "$max_delta" in ''|*[!0-9]*) printf 'missing lifecycle oracle delta at step %s\n' "$sequence" >&2; exit 1 ;; esac
+        cpu_sha256=$(shasum -a 256 "$cpu_readback" | awk '{ print $1 }')
+        gpui_sha256=$(shasum -a 256 "$sequence_dir/gpui/$readback_path" | awk '{ print $1 }')
+        cat >> "$sequence_qualification_tmp" <<EOF
+
+[[steps]]
+sequence = $sequence
+transition = "$transition"
+scene_path = "$scene_path"
+workload_hash = "$workload_hash"
+expected_cpu_bytes = $expected_bytes
+cpu_oracle_sha256 = "$cpu_sha256"
+gpui_metal_sha256 = "$gpui_sha256"
+cpu_oracle_max_observed_channel_delta = $max_delta
+semantic_and_pixel_equivalent = true
+EOF
+        sequence_visible_count=$((sequence_visible_count + 1))
+    fi
+    sequence_count=$((sequence_count + 1))
+done < "$sequence_rows"
+[ "$sequence_count" -eq 6 ] && [ "$sequence_visible_count" -eq 5 ] || { printf 'GPUI lifecycle execution count drifted\n' >&2; exit 1; }
+rm "$sequence_rows"
+mv "$sequence_qualification_tmp" "$sequence_dir/qualification.toml"
+sequence_qualification_sha256=$(shasum -a 256 "$sequence_dir/qualification.toml" | awk '{ print $1 }')
+
 set_manifest_tmp="$output_absolute/.qualification-set.toml.tmp"
 cat > "$set_manifest_tmp" <<EOF
 schema = "alpine-renderer-equivalence-set/v2"
@@ -330,6 +492,13 @@ alpine_revision = "$alpine_commit"
 trace_manifest_path = "$trace_manifest_path"
 trace_manifest_sha256 = "$trace_manifest_sha256"
 fixture_count = $fixture_count
+sequence_manifest_path = "$sequence_manifest_path"
+sequence_manifest_sha256 = "$sequence_manifest_sha256"
+atlas_lifecycle_performed = true
+atlas_lifecycle_visible_steps = $sequence_visible_count
+atlas_lifecycle_qualification_sha256 = "$sequence_qualification_sha256"
+gpui_atlas_lifecycle_evidence_sha256 = "$gpui_sequence_sha256"
+alpine_atlas_lifecycle_evidence_sha256 = "$alpine_sequence_sha256"
 direct_metal_performed = $direct_metal_performed
 cpu_oracle_channel_tolerance = 1
 cpu_oracle_equivalence_within_tolerance_all = true
