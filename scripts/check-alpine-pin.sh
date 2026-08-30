@@ -59,6 +59,7 @@ case "$sequence_manifest_sha256" in *[!0-9a-f]*|'') printf 'sequence manifest id
 [ "${#sequence_manifest_sha256}" -eq 64 ] || { printf 'sequence manifest identity must contain 64 hexadecimal characters\n' >&2; exit 1; }
 
 trace_manifest_file=${ALPINE_TRACE_MANIFEST_FILE:-$trace_manifest_path}
+sequence_manifest_file=${ALPINE_SEQUENCE_MANIFEST_FILE:-}
 [ -f "$trace_manifest_file" ] || { printf 'Alpine trace manifest is missing: %s\n' "$trace_manifest_file" >&2; exit 1; }
 actual_manifest_sha256=$(shasum -a 256 "$trace_manifest_file" | awk '{ print $1 }')
 [ "$actual_manifest_sha256" = "$trace_manifest_sha256" ] || { printf 'Alpine trace manifest fingerprint mismatch\n' >&2; exit 1; }
@@ -143,8 +144,13 @@ if [ -e .lab/alpine ] || [ -L .lab/alpine ]; then
         fi
     done < "$trace_manifest_file"
 
-    sequence_manifest_file=".lab/alpine/$sequence_manifest_path"
-    [ -f "$sequence_manifest_file" ] || { printf 'Alpine checkout lacks %s\n' "$sequence_manifest_path" >&2; exit 1; }
+    if [ -z "$sequence_manifest_file" ]; then
+        sequence_manifest_file=".lab/alpine/$sequence_manifest_path"
+    fi
+fi
+
+if [ -n "$sequence_manifest_file" ]; then
+    [ -f "$sequence_manifest_file" ] || { printf 'Alpine sequence manifest is missing: %s\n' "$sequence_manifest_file" >&2; exit 1; }
     actual_sequence_sha=$(shasum -a 256 "$sequence_manifest_file" | awk '{ print $1 }')
     [ "$actual_sequence_sha" = "$sequence_manifest_sha256" ] || { printf 'Alpine sequence manifest fingerprint mismatch\n' >&2; exit 1; }
     awk -F '[[:space:]]*=[[:space:]]*' '

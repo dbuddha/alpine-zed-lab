@@ -52,8 +52,41 @@ if ALPINE_PIN_FILE="$test_dir/wrong-alpine-manifest-hash.toml" scripts/check-alp
     exit 1
 fi
 
-sed 's/2e85ae89b33b6af0d2577b9f4a7f0338b0d3ced81e61e075166cf883b38e12b8/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' pins/alpine.toml > "$test_dir/wrong-alpine-sequence-hash.toml"
-if ALPINE_PIN_FILE="$test_dir/wrong-alpine-sequence-hash.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
+cat > "$test_dir/alpine-sequence.toml" <<'EOF'
+schema = "alpine-scene-trace-sequence/v1"
+id = "editor-atlas-lifecycle"
+task = 353
+
+[[steps]]
+sequence = 0
+transition = "full-admission"
+
+[[steps]]
+sequence = 1
+transition = "compatible-reuse"
+
+[[steps]]
+sequence = 2
+transition = "content-replacement"
+
+[[steps]]
+sequence = 3
+transition = "capacity-replacement"
+
+[[steps]]
+sequence = 4
+transition = "teardown"
+
+[[steps]]
+sequence = 5
+transition = "full-resynchronization"
+EOF
+sequence_fixture_hash=$(shasum -a 256 "$test_dir/alpine-sequence.toml" | awk '{ print $1 }')
+sed "s/2e85ae89b33b6af0d2577b9f4a7f0338b0d3ced81e61e075166cf883b38e12b8/$sequence_fixture_hash/" pins/alpine.toml > "$test_dir/alpine-sequence-fixture.toml"
+ALPINE_PIN_FILE="$test_dir/alpine-sequence-fixture.toml" ALPINE_SEQUENCE_MANIFEST_FILE="$test_dir/alpine-sequence.toml" scripts/check-alpine-pin.sh >/dev/null
+
+sed "s/$sequence_fixture_hash/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/" "$test_dir/alpine-sequence-fixture.toml" > "$test_dir/wrong-alpine-sequence-hash.toml"
+if ALPINE_PIN_FILE="$test_dir/wrong-alpine-sequence-hash.toml" ALPINE_SEQUENCE_MANIFEST_FILE="$test_dir/alpine-sequence.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
     printf 'wrong Alpine sequence manifest fingerprint unexpectedly passed\n' >&2
     exit 1
 fi
