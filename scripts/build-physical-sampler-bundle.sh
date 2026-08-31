@@ -33,6 +33,12 @@ toml_value() {
     sed -nE "s/^${key} = \"([^\"]*)\"$/\\1/p" "$file"
 }
 
+toml_raw() {
+    file=$1
+    key=$2
+    sed -nE "s/^${key} = ([^[:space:]]+)$/\\1/p" "$file"
+}
+
 hash_file() {
     shasum -a 256 "$1" | awk '{ print $1 }'
 }
@@ -62,7 +68,7 @@ done
 [ "$(toml_value "$oracle_set" zed_revision)" = "$zed_revision" ] || fail 'oracle Zed revision drifted'
 [ "$(toml_value "$oracle_set" trace_manifest_sha256)" = "$trace_manifest_sha256" ] || fail 'oracle trace manifest drifted'
 [ "$(toml_value "$oracle_set" shader_mode)" = offline-metallib ] || fail 'oracle did not use offline metallib shaders'
-[ "$(toml_value "$oracle_set" performance_qualified)" = false ] || fail 'oracle unexpectedly claims performance qualification'
+[ "$(toml_raw "$oracle_set" performance_qualified)" = false ] || fail 'oracle unexpectedly claims performance qualification'
 patch_series_sha256=$(toml_value "$oracle_set" patch_series_sha256)
 case "$patch_series_sha256" in *[!0-9a-f]*|'') fail 'oracle patch-series identity is invalid' ;; esac
 [ "${#patch_series_sha256}" -eq 64 ] || fail 'oracle patch-series identity length drifted'
