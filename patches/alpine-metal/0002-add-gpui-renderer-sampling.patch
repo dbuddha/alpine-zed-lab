@@ -140,7 +140,7 @@ index cdae1484c8..b3eaf4bd93 100644
          let manifest = arguments
              .next()
 diff --git a/crates/alpine_trace_adapter/src/v2.rs b/crates/alpine_trace_adapter/src/v2.rs
-index c8a51168d5..278e9a4ec3 100644
+index c8a51168d5..41339aa48b 100644
 --- a/crates/alpine_trace_adapter/src/v2.rs
 +++ b/crates/alpine_trace_adapter/src/v2.rs
 @@ -1,6 +1,9 @@
@@ -362,3 +362,50 @@ index c8a51168d5..278e9a4ec3 100644
  pub(crate) struct PreparedTrace {
      trace: Trace,
      size: Size<DevicePixels>,
+@@ -760,6 +948,8 @@ mod tests {
+     };
+ 
+     use super::{canonical_workload_hash, decode, sha256_hex};
++    #[cfg(all(target_os = "macos", not(feature = "runtime-shaders")))]
++    use crate::benchmark_trace_file;
+     use crate::render_trace_file;
+ 
+     struct TestAtlas;
+@@ -1044,6 +1234,37 @@ mod tests {
+         fs::remove_dir(root).expect("remove test directory");
+     }
+ 
++    #[cfg(all(target_os = "macos", not(feature = "runtime-shaders")))]
++    #[test]
++    fn benchmarks_v2_through_public_file_boundary() {
++        let root = unique_test_path("v2-benchmark");
++        fs::create_dir(&root).expect("create test directory");
++        let trace = root.join("trace.toml");
++        let output = root.join("samples.csv");
++        fs::write(&trace, valid_source()).expect("write trace");
++
++        let report = benchmark_trace_file(&trace, &output, 1, 2).expect("benchmark v2 trace");
++        assert_eq!(report.identity().schema(), "alpine-scene-trace/v2");
++        assert_eq!(report.adaptation().quad_count(), 1);
++        assert_eq!(report.adaptation().glyph_count(), 1);
++        assert_eq!(report.admission_iterations(), 1);
++        assert_eq!(report.warmup_iterations(), 1);
++        assert_eq!(report.sample_count(), 2);
++        let csv = fs::read_to_string(&output).expect("read samples");
++        assert_eq!(csv.lines().next(), Some("sample_index,elapsed_ns"));
++        assert_eq!(csv.lines().count(), 3);
++        assert!(
++            benchmark_trace_file(&trace, &output, 0, 1)
++                .err()
++                .expect("sample collision must fail")
++                .contains("output already exists")
++        );
++
++        fs::remove_file(trace).expect("remove trace");
++        fs::remove_file(output).expect("remove output");
++        fs::remove_dir(root).expect("remove test directory");
++    }
++
+     fn valid_source() -> String {
+         let content_hash = sha256_hex(&[255, 0, 255, 0]);
+         rebind(format!(
