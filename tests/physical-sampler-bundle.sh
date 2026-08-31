@@ -28,6 +28,22 @@ for file in \
 do
     printf '%s\n' "$file" > "$bundle/$file"
 done
+cat > "$bundle/bin/alpine-assurance" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$#" -eq 3 ] && [ "$1" = render-scene-native ]
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+cp "$root/oracle/realistic-code-viewport/cpu-oracle.bgra" "$3"
+printf 'rendered fixture through direct-metal to %s\n' "$3"
+EOF
+cat > "$bundle/bin/alpine-trace-adapter" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$#" -eq 2 ]
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+cp "$root/oracle/realistic-code-viewport/cpu-oracle.bgra" "$2"
+printf 'adaptation_clips=1 adaptation_operations=11 adaptation_quads=4 adaptation_glyphs=7 adaptation_resources=1 adaptation_resource_bytes=64 adaptation_atlas_allocations=1 output=%s\n' "$2"
+EOF
 chmod 755 "$bundle/bin/alpine-assurance" "$bundle/bin/alpine-trace-adapter"
 lab_revision=1111111111111111111111111111111111111111
 alpine_revision=2222222222222222222222222222222222222222
@@ -142,6 +158,22 @@ assert_rejected() {
     fi
 }
 
+assert_admission_rejected() {
+    name=$1
+    archive=$2
+    checksum=$3
+    if ALPINE_LAB_TESTING=1 \
+        ALPINE_BUNDLE_TEST_PLATFORM=darwin-arm64 \
+        ALPINE_BUNDLE_TEST_CI_PASS=success \
+        scripts/admit-physical-sampler-bundle.sh \
+            "$archive" "$checksum" "$root/admission-$name" > "$root/admission-$name.log" 2>&1
+    then
+        printf 'invalid physical sampler admission unexpectedly passed: %s\n' "$name" >&2
+        exit 1
+    fi
+    [ ! -e "$root/admission-$name" ]
+}
+
 mkdir -p "$root/reference-artifact"
 reference_archive="$root/reference-artifact/physical-samplers.tar"
 make_archive "$root/reference" "$reference_archive"
@@ -150,6 +182,36 @@ ALPINE_BUNDLE_TEST_PLATFORM=darwin-arm64 \
 ALPINE_BUNDLE_TEST_CI_PASS=success \
 scripts/verify-physical-sampler-bundle.sh \
     "$reference_archive" "$reference_archive.sha256" "$root/output-valid" >/dev/null
+ALPINE_LAB_TESTING=1 \
+ALPINE_BUNDLE_TEST_PLATFORM=darwin-arm64 \
+ALPINE_BUNDLE_TEST_CI_PASS=success \
+scripts/admit-physical-sampler-bundle.sh \
+    "$reference_archive" "$reference_archive.sha256" "$root/admission-valid" >/dev/null
+grep -Fq 'state = "equivalent"' "$root/admission-valid/qualification-set.toml"
+grep -Fq 'direct_metal_performed = true' "$root/admission-valid/qualification-set.toml"
+grep -Fq 'performance_qualified = false' "$root/admission-valid/qualification-set.toml"
+grep -Fq 'performance_claim = "none"' "$root/admission-valid/qualification-set.toml"
+grep -Fq 'exact_metal_equivalence = true' \
+    "$root/admission-valid/realistic-code-viewport/qualification.toml"
+
+divergent="$root/divergent"
+cp -R "$root/reference" "$divergent"
+cat > "$divergent/physical-samplers/bin/alpine-trace-adapter" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$#" -eq 2 ]
+printf 'divergent' > "$2"
+printf 'adaptation_clips=1 adaptation_operations=11 adaptation_quads=4 adaptation_glyphs=7 adaptation_resources=1 adaptation_resource_bytes=64 adaptation_atlas_allocations=1 output=%s\n' "$2"
+EOF
+chmod 755 "$divergent/physical-samplers/bin/alpine-trace-adapter"
+divergent_hash=$(hash_file "$divergent/physical-samplers/bin/alpine-trace-adapter")
+sed "s/gpui_sampler_sha256 = \"[0-9a-f]*\"/gpui_sampler_sha256 = \"$divergent_hash\"/" \
+    "$divergent/physical-samplers/manifest.toml" > "$divergent/manifest.tmp"
+mv "$divergent/manifest.tmp" "$divergent/physical-samplers/manifest.toml"
+mkdir -p "$root/divergent-artifact"
+divergent_archive="$root/divergent-artifact/physical-samplers.tar"
+make_archive "$divergent" "$divergent_archive"
+assert_admission_rejected divergent "$divergent_archive" "$divergent_archive.sha256"
 
 missing_fixture="$root/missing-fixture"
 cp -R "$root/reference" "$missing_fixture"
