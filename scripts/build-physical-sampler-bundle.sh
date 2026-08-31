@@ -87,7 +87,11 @@ scripts/check-pin.sh
 scripts/check-alpine-pin.sh
 scripts/check-adapter-patch.sh
 
-work_root=$(mktemp -d .lab/physical-sampler.XXXXXX)
+work_root=$(mktemp -d "$repo_root/.lab/physical-sampler.XXXXXX")
+case "$work_root" in
+    "$repo_root"/.lab/physical-sampler.*) ;;
+    *) fail 'temporary worktree escaped the lab root' ;;
+esac
 variant_checkout="$work_root/zed"
 target_root="$work_root/target"
 candidate="$work_root/candidate"
