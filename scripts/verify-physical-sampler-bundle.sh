@@ -78,6 +78,8 @@ oracle_cpu_path
 oracle_cpu_sha256
 oracle_equivalence_path
 oracle_equivalence_sha256
+oracle_fixture_path
+oracle_fixture_sha256
 oracle_gpui_path
 oracle_gpui_sha256
 oracle_set_path
@@ -97,6 +99,7 @@ sdk_sha256
 shader_mode
 timing_performed
 trace_id
+trace_canonical_path
 trace_manifest_sha256
 trace_path
 trace_schema
@@ -127,6 +130,7 @@ actual_keys=$(awk -F '[[:space:]]*=[[:space:]]*' 'NF == 2 { print $1 } NF != 2 {
 [ "$(toml_value architecture)" = arm64 ] || fail 'bundle architecture drifted'
 [ "$(toml_value trace_id)" = realistic-code-viewport ] || fail 'bundle trace identity drifted'
 [ "$(toml_value trace_schema)" = alpine-scene-trace/v2 ] || fail 'bundle trace schema drifted'
+case "$(toml_value trace_canonical_path)" in assurance/qualification/v2/*.toml) ;; *) fail 'bundle canonical trace path drifted' ;; esac
 
 lab_revision=$(toml_value lab_revision)
 workflow_sha=$(toml_value workflow_sha)
@@ -140,7 +144,7 @@ case "$workflow_run_id" in ''|*[!0-9]*) fail 'workflow run identity is invalid' 
 
 for prefix in \
     alpine_sampler gpui_sampler alpine_metallib gpui_metallib \
-    oracle_set oracle_equivalence oracle_cpu oracle_gpui trace alpine_pin zed_pin \
+    oracle_set oracle_fixture oracle_equivalence oracle_cpu oracle_gpui trace alpine_pin zed_pin \
     patch_one patch_two alpine_rustc zed_rustc xcode sdk macos
 do
     path=$(toml_value "${prefix}_path")
@@ -165,10 +169,30 @@ patch_series_actual=$(shasum -a 256 "$patch_series_file" | awk '{ print $1 }')
 [ -x "$bundle/$(toml_value alpine_sampler_path)" ] || fail 'Alpine sampler is not executable'
 [ -x "$bundle/$(toml_value gpui_sampler_path)" ] || fail 'GPUI sampler is not executable'
 oracle_manifest="$bundle/$(toml_value oracle_set_path)"
+oracle_fixture="$bundle/$(toml_value oracle_fixture_path)"
 [ "$(sed -nE 's/^state = "([^"]+)"$/\1/p' "$oracle_manifest")" = gpui-oracle-equivalent ] || fail 'bundled oracle state drifted'
 [ "$(sed -nE 's/^lab_revision = "([0-9a-f]+)"$/\1/p' "$oracle_manifest")" = "$lab_revision" ] || fail 'bundled oracle revision drifted'
 [ "$(sed -nE 's/^shader_mode = "([^"]+)"$/\1/p' "$oracle_manifest")" = offline-metallib ] || fail 'bundled oracle shader mode drifted'
 [ "$(sed -nE 's/^performance_qualified = ([a-z]+)$/\1/p' "$oracle_manifest")" = false ] || fail 'bundled oracle qualification drifted'
+[ "$(sed -nE 's/^schema = "([^"]+)"$/\1/p' "$oracle_fixture")" = alpine-renderer-equivalence/v2 ] || fail 'bundled oracle fixture schema drifted'
+[ "$(sed -nE 's/^state = "([^"]+)"$/\1/p' "$oracle_fixture")" = gpui-oracle-equivalent ] || fail 'bundled oracle fixture state drifted'
+[ "$(sed -nE 's/^lab_revision = "([0-9a-f]+)"$/\1/p' "$oracle_fixture")" = "$lab_revision" ] || fail 'bundled oracle fixture revision drifted'
+[ "$(sed -nE 's/^alpine_revision = "([0-9a-f]+)"$/\1/p' "$oracle_fixture")" = "$(toml_value alpine_revision)" ] || fail 'bundled oracle fixture Alpine revision drifted'
+[ "$(sed -nE 's/^zed_revision = "([0-9a-f]+)"$/\1/p' "$oracle_fixture")" = "$(toml_value zed_revision)" ] || fail 'bundled oracle fixture Zed revision drifted'
+[ "$(sed -nE 's/^trace_manifest_sha256 = "([0-9a-f]+)"$/\1/p' "$oracle_fixture")" = "$(toml_value trace_manifest_sha256)" ] || fail 'bundled oracle fixture trace manifest drifted'
+[ "$(sed -nE 's/^trace_schema = "([^"]+)"$/\1/p' "$oracle_fixture")" = "$(toml_value trace_schema)" ] || fail 'bundled oracle fixture trace schema drifted'
+[ "$(sed -nE 's/^trace_id = "([^"]+)"$/\1/p' "$oracle_fixture")" = "$(toml_value trace_id)" ] || fail 'bundled oracle fixture trace identity drifted'
+[ "$(sed -nE 's/^trace_path = "([^"]+)"$/\1/p' "$oracle_fixture")" = "$(toml_value trace_canonical_path)" ] || fail 'bundled oracle fixture trace path drifted'
+[ "$(sed -nE 's/^scene_trace_sha256 = "([0-9a-f]+)"$/\1/p' "$oracle_fixture")" = "$(toml_value trace_sha256)" ] || fail 'bundled oracle fixture trace hash drifted'
+[ "$(sed -nE 's/^workload_hash = "([0-9a-f]+)"$/\1/p' "$oracle_fixture")" = "$(toml_value workload_hash)" ] || fail 'bundled oracle fixture workload drifted'
+[ "$(sed -nE 's/^cpu_oracle_sha256 = "([0-9a-f]+)"$/\1/p' "$oracle_fixture")" = "$(toml_value oracle_cpu_sha256)" ] || fail 'bundled oracle fixture CPU hash drifted'
+[ "$(sed -nE 's/^gpui_metal_sha256 = "([0-9a-f]+)"$/\1/p' "$oracle_fixture")" = "$(toml_value oracle_gpui_sha256)" ] || fail 'bundled oracle fixture GPUI hash drifted'
+[ "$(sed -nE 's/^shader_mode = "([^"]+)"$/\1/p' "$oracle_fixture")" = offline-metallib ] || fail 'bundled oracle fixture shader mode drifted'
+[ "$(sed -nE 's/^direct_metal_performed = ([a-z]+)$/\1/p' "$oracle_fixture")" = false ] || fail 'bundled oracle fixture unexpectedly performed Direct Metal'
+[ "$(sed -nE 's/^cpu_oracle_equivalence_within_tolerance = ([a-z]+)$/\1/p' "$oracle_fixture")" = true ] || fail 'bundled oracle fixture CPU equivalence drifted'
+[ "$(sed -nE 's/^exact_metal_equivalence = ([a-z]+)$/\1/p' "$oracle_fixture")" = false ] || fail 'bundled oracle fixture unexpectedly claims full Metal equivalence'
+[ "$(sed -nE 's/^renderer_timing_performed = ([a-z]+)$/\1/p' "$oracle_fixture")" = false ] || fail 'bundled oracle fixture unexpectedly contains timing'
+[ "$(sed -nE 's/^performance_qualified = ([a-z]+)$/\1/p' "$oracle_fixture")" = false ] || fail 'bundled oracle fixture unexpectedly claims qualification'
 
 host_source=physical
 if [ "${ALPINE_LAB_TESTING:-0}" = 1 ]; then

@@ -262,7 +262,7 @@ while IFS="$tab" read -r fixture_id trace_schema trace_path scene_trace_sha256 w
         case "$value" in ''|*[!0-9]*) printf 'invalid adaptation counter for %s\n' "$fixture_id" >&2; exit 1 ;; esac
     done
 
-    manifest_tmp="$fixture_dir/.qualification.toml.tmp"
+    manifest_tmp="$fixture_dir/qualification.toml.tmp"
     cat > "$manifest_tmp" <<EOF
 schema = "alpine-renderer-equivalence/v2"
 state = "$state"
