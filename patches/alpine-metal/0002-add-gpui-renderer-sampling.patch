@@ -2,7 +2,7 @@ diff --git a/crates/alpine_trace_adapter/src/lib.rs b/crates/alpine_trace_adapte
 index 633f3606dd..36f7d6e82a 100644
 --- a/crates/alpine_trace_adapter/src/lib.rs
 +++ b/crates/alpine_trace_adapter/src/lib.rs
-@@ -196,6 +196,39 @@ pub struct RenderedTrace {
+@@ -196,6 +196,34 @@ pub struct RenderedTrace {
      adaptation: AdaptationReport,
  }
  
@@ -11,7 +11,6 @@ index 633f3606dd..36f7d6e82a 100644
 +pub struct BenchmarkReport {
 +    identity: TraceIdentity,
 +    adaptation: AdaptationReport,
-+    admission_iterations: u64,
 +    warmup_iterations: u64,
 +    sample_count: u64,
 +}
@@ -24,10 +23,6 @@ index 633f3606dd..36f7d6e82a 100644
 +    /// Returns adaptation evidence collected before measurement.
 +    pub const fn adaptation(&self) -> AdaptationReport {
 +        self.adaptation
-+    }
-+    /// Returns the semantic admission renders performed before warmup.
-+    pub const fn admission_iterations(&self) -> u64 {
-+        self.admission_iterations
 +    }
 +    /// Returns the additional discarded warmup renders.
 +    pub const fn warmup_iterations(&self) -> u64 {
@@ -86,7 +81,7 @@ index cdae1484c8..b3eaf4bd93 100644
  
  fn main() -> ExitCode {
      match run() {
-@@ -18,8 +18,58 @@ fn main() -> ExitCode {
+@@ -18,8 +18,57 @@ fn main() -> ExitCode {
  fn run() -> Result<String, String> {
      let mut arguments = env::args().skip(1);
      let first = arguments.next().ok_or_else(|| {
@@ -123,7 +118,7 @@ index cdae1484c8..b3eaf4bd93 100644
 +        let identity = report.identity();
 +        let adaptation = report.adaptation();
 +        return Ok(format!(
-+            "schema=alpine-zed-gpui-renderer-samples/v1 trace_schema={} id={} workload_hash={} revision={} width={} height={} adaptation_clips={} adaptation_operations={} adaptation_quads={} adaptation_glyphs={} adaptation_resources={} adaptation_resource_bytes={} adaptation_atlas_allocations={} adaptation_timing_performed=false admission_iterations={} warmup_iterations={} sample_count={} measurement_stage=renderer-submit-readback clock=process-monotonic-instant renderer_timing_performed=true performance_qualified=false output={}",
++            "schema=alpine-zed-gpui-renderer-samples/v1 trace_schema={} id={} workload_hash={} revision={} width={} height={} adaptation_clips={} adaptation_operations={} adaptation_quads={} adaptation_glyphs={} adaptation_resources={} adaptation_resource_bytes={} adaptation_atlas_allocations={} adaptation_timing_performed=false admission_iterations=1 warmup_iterations={} sample_count={} measurement_stage=renderer-submit-readback clock=process-monotonic-instant renderer_timing_performed=true performance_qualified=false output={}",
 +            identity.schema(),
 +            identity.id(),
 +            identity.workload_hash(),
@@ -137,7 +132,6 @@ index cdae1484c8..b3eaf4bd93 100644
 +            adaptation.resource_count(),
 +            adaptation.resource_bytes(),
 +            adaptation.atlas_allocations(),
-+            report.admission_iterations(),
 +            report.warmup_iterations(),
 +            report.sample_count(),
 +            output,
@@ -179,7 +173,7 @@ index c8a51168d5..1a38cf681e 100644
  
  #[derive(Debug, Deserialize)]
  #[serde(deny_unknown_fields)]
-@@ -114,6 +119,238 @@ pub(super) fn render_source(source: &str, output_path: &Path) -> Result<Rendered
+@@ -114,6 +119,237 @@ pub(super) fn render_source(source: &str, output_path: &Path) -> Result<Rendered
      })
  }
  
@@ -256,7 +250,6 @@ index c8a51168d5..1a38cf681e 100644
 +    Ok(BenchmarkReport {
 +        identity: prepared.identity,
 +        adaptation,
-+        admission_iterations: 1,
 +        warmup_iterations,
 +        sample_count,
 +    })
@@ -427,7 +420,7 @@ index c8a51168d5..1a38cf681e 100644
      use crate::render_trace_file;
  
      struct TestAtlas;
-@@ -1044,6 +1283,53 @@ mod tests {
+@@ -1044,6 +1282,52 @@ mod tests {
          fs::remove_dir(root).expect("remove test directory");
      }
  
@@ -455,12 +448,11 @@ index c8a51168d5..1a38cf681e 100644
 +                .contains("requires alpine-scene-trace/v2")
 +        );
 +
-+        let report = benchmark_trace_file(&trace, &output, 1, 2).expect("benchmark v2 trace");
++        let report = benchmark_trace_file(&trace, &output, 2, 2).expect("benchmark v2 trace");
 +        assert_eq!(report.identity().schema(), "alpine-scene-trace/v2");
 +        assert_eq!(report.adaptation().quad_count(), 1);
 +        assert_eq!(report.adaptation().glyph_count(), 1);
-+        assert_eq!(report.admission_iterations(), 1);
-+        assert_eq!(report.warmup_iterations(), 1);
++        assert_eq!(report.warmup_iterations(), 2);
 +        assert_eq!(report.sample_count(), 2);
 +        let csv = fs::read_to_string(&output).expect("read samples");
 +        assert_eq!(csv.lines().next(), Some("sample_index,elapsed_ns"));
