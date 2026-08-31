@@ -41,8 +41,8 @@ assert_rejected missing-always '  ci-pass:
     name: ci-pass
     if: success()'
 assert_rejected missing-oracle-need \
-    '    needs: [policy, provision, paired-protocol, gpui-oracle-equivalence]' \
-    '    needs: [policy, provision, paired-protocol]'
+    '    needs: [policy, provision, paired-protocol, gpui-oracle-equivalence, physical-sampler-bundle]' \
+    '    needs: [policy, provision, paired-protocol, physical-sampler-bundle]'
 assert_rejected missing-policy-result \
     '          POLICY_RESULT: ${{ needs.policy.result }}' \
     '          POLICY_RESULT_REMOVED: ${{ needs.policy.result }}'
@@ -58,5 +58,11 @@ assert_rejected protocol-not-required \
 assert_rejected oracle-not-required \
     '          test "$GPUI_ORACLE_RESULT" = success' \
     '          test "$GPUI_ORACLE_RESULT" = failure'
+assert_rejected sampler-not-required \
+    '          test "$PHYSICAL_SAMPLER_RESULT" = success' \
+    '          test "$PHYSICAL_SAMPLER_RESULT" = failure'
+assert_rejected publisher-before-ci \
+    '    needs: [ci-pass, policy, gpui-oracle-equivalence]' \
+    '    needs: [policy, gpui-oracle-equivalence]'
 
 printf 'aggregate workflow gate controls passed\n'

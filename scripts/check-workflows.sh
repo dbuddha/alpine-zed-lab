@@ -54,7 +54,7 @@ printf '%s\n' "$ci_pass_block" | grep -Fq '    if: always()' || {
     exit 1
 }
 printf '%s\n' "$ci_pass_block" |
-    grep -Fq '    needs: [policy, provision, paired-protocol, gpui-oracle-equivalence]' || {
+    grep -Fq '    needs: [policy, provision, paired-protocol, gpui-oracle-equivalence, physical-sampler-bundle]' || {
     printf 'aggregate ci-pass must depend on every required lab gate\n' >&2
     exit 1
 }
@@ -63,7 +63,8 @@ for binding in \
     'POLICY_RESULT: ${{ needs.policy.result }}' \
     'PROVISION_RESULT: ${{ needs.provision.result }}' \
     'PAIRED_PROTOCOL_RESULT: ${{ needs.paired-protocol.result }}' \
-    'GPUI_ORACLE_RESULT: ${{ needs.gpui-oracle-equivalence.result }}'
+    'GPUI_ORACLE_RESULT: ${{ needs.gpui-oracle-equivalence.result }}' \
+    'PHYSICAL_SAMPLER_RESULT: ${{ needs.physical-sampler-bundle.result }}'
 do
     printf '%s\n' "$ci_pass_block" | grep -Fq "$binding" || {
         printf 'aggregate ci-pass is missing result binding: %s\n' "$binding" >&2
@@ -71,12 +72,25 @@ do
     }
 done
 
-for result in POLICY PROVISION PAIRED_PROTOCOL GPUI_ORACLE; do
+for result in POLICY PROVISION PAIRED_PROTOCOL GPUI_ORACLE PHYSICAL_SAMPLER; do
     printf '%s\n' "$ci_pass_block" |
         grep -Fq "test \"\$${result}_RESULT\" = success" || {
         printf 'aggregate ci-pass does not require success from %s\n' "$result" >&2
         exit 1
     }
 done
+
+physical_retention=$(awk '
+    /name: physical-sampler-candidate-/ { artifact = 1; next }
+    artifact && /retention-days:/ { print $2; exit }
+' "$ci_workflow")
+[ "$physical_retention" = 90 ] || {
+    printf 'physical sampler candidates must be retained for exactly 90 days\n' >&2
+    exit 1
+}
+grep -Fq '    needs: [ci-pass, policy, gpui-oracle-equivalence]' "$ci_workflow" || {
+    printf 'physical sampler publication must wait for aggregate ci-pass and oracle evidence\n' >&2
+    exit 1
+}
 
 printf 'workflow pin checks passed\n'

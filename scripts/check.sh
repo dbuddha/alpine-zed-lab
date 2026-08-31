@@ -17,6 +17,7 @@ scripts/check-license-boundary.sh
 scripts/check-adapter-patch.sh
 scripts/check-workflows.sh
 tests/workflow-gate.sh
+tests/physical-sampler-bundle.sh
 tests/policy.sh
 
 printf 'Alpine Zed Lab checks passed\n'
