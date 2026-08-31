@@ -60,6 +60,37 @@ jobs:
           test -z "$(git -C .lab/zed status --porcelain)"
           test -z "$(git -C .lab/alpine status --porcelain)"
 
+  paired-protocol:
+    name: paired-renderer-protocol
+    needs: policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: dbuddha/alpine-gpui
+          ref: ${{ needs.policy.outputs.alpine_commit }}
+          path: .lab/alpine
+          persist-credentials: false
+      - name: Prove paired order, identity, completeness, and no-claim controls
+        run: |
+          cargo build --locked \
+            --manifest-path .lab/alpine/Cargo.toml \
+            -p alpine-assurance
+          ALPINE_ASSURANCE_BIN="$PWD/.lab/alpine/target/debug/alpine-assurance" \
+            tests/paired-renderer-samples.sh artifacts/hosted-paired-protocol --keep
+      - name: Upload paired protocol fixture
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: paired-protocol-${{ github.sha }}
+          path: artifacts/hosted-paired-protocol
+          retention-days: 90
+          if-no-files-found: error
+
   gpui-oracle-equivalence:
     name: gpui-oracle-equivalence
     needs: policy
@@ -108,7 +139,7 @@ jobs:
   ci-pass:
     name: ci-pass
     if: always()
-    needs: [policy, provision, gpui-oracle-equivalence]
+    needs: [policy, provision, paired-protocol, gpui-oracle-equivalence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -116,8 +147,10 @@ jobs:
         env:
           POLICY_RESULT: ${{ needs.policy.result }}
           PROVISION_RESULT: ${{ needs.provision.result }}
+          PAIRED_PROTOCOL_RESULT: ${{ needs.paired-protocol.result }}
           GPUI_ORACLE_RESULT: ${{ needs.gpui-oracle-equivalence.result }}
         run: |
           test "$POLICY_RESULT" = success
           test "$PROVISION_RESULT" = success
+          test "$PAIRED_PROTOCOL_RESULT" = success
           test "$GPUI_ORACLE_RESULT" = success

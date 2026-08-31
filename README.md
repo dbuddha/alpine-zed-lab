@@ -13,7 +13,7 @@ license obligations.
 
 The lab pins Zed `v1.15.0` at
 `e17dc4f9d50db73a458b64dcce50ecd4878b98a3` and Alpine at
-`4e6ee28668d3cd7a62e347e7b9f96c99318956ab`. It establishes source isolation,
+`2fdf5aa283e7d773203a76b394ed2e62428c16e4`. It establishes source isolation,
 license checks, an immutable eight-fixture trace manifest, and reviewed
 patch-series checks. The GPL adapter preserves the version 1 solid-quad control
 and independently decodes version 2 clips, quads, one prepared A8 atlas,
@@ -149,6 +149,28 @@ Hosted Apple Silicon checks run the pinned GPUI Metal result against the Alpine
 CPU oracle. Direct Metal comparison remains a physical-hardware gate because
 Alpine intentionally rejects GitHub's virtual Metal device as a supported
 production target.
+
+### Paired renderer calibration inputs
+
+Task #478 adds one fail-closed command with capture and compose phases. Capture
+requires a clean lab revision, the exact pinned Alpine and Zed identities, a
+leased physical Apple Silicon window, offline shaders, and retained exact Metal
+equivalence for the selected trace. It executes independent Alpine A/A, GPUI
+A/A, and seeded cross-renderer AB/BA lanes while retaining every invocation and
+keeping GPUI adaptation counters outside renderer elapsed samples.
+
+    scripts/run-paired-renderer-samples.sh capture [arguments]
+    scripts/run-paired-renderer-samples.sh compose [arguments]
+
+Compose rejects fewer than twenty complete runs, fewer than four independent
+windows, duplicate seeds or leases, malformed samples, one-sided order,
+identity or stage drift, partial bundles, artifact replacement, and mixed
+environment classes. It emits two manifests accepted by Alpine's
+alpine-aa-calibration/v1 validator plus a separate cross-renderer raw artifact.
+The hosted control uses explicit test-fixture windows and deterministic fake
+samplers, so it proves protocol shape only. Physical distributions, confidence
+intervals, residency, E4 qualification, and every performance claim remain
+owned by Alpine Tasks #470 through #472 and Requirement #53.
 
 ## Authority
 

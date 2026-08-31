@@ -14,7 +14,7 @@ cp pins/alpine.toml "$test_dir/alpine.toml"
 cp pins/alpine-traces.tsv "$test_dir/alpine-traces.tsv"
 ALPINE_PIN_FILE="$test_dir/alpine.toml" scripts/check-alpine-pin.sh >/dev/null
 
-sed 's/4e6ee28668d3cd7a62e347e7b9f96c99318956ab/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
+sed 's/2fdf5aa283e7d773203a76b394ed2e62428c16e4/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
 if ALPINE_PIN_FILE="$test_dir/invalid-alpine-commit.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
     printf 'invalid Alpine commit fixture unexpectedly passed\n' >&2
     exit 1
