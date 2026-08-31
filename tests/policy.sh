@@ -14,7 +14,7 @@ cp pins/alpine.toml "$test_dir/alpine.toml"
 cp pins/alpine-traces.tsv "$test_dir/alpine-traces.tsv"
 ALPINE_PIN_FILE="$test_dir/alpine.toml" scripts/check-alpine-pin.sh >/dev/null
 
-sed 's/1b6d16e6ddc120a7670fc225913dad9908dd482c/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
+sed 's/4e6ee28668d3cd7a62e347e7b9f96c99318956ab/not-a-sha/' pins/alpine.toml > "$test_dir/invalid-alpine-commit.toml"
 if ALPINE_PIN_FILE="$test_dir/invalid-alpine-commit.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
     printf 'invalid Alpine commit fixture unexpectedly passed\n' >&2
     exit 1
@@ -33,6 +33,12 @@ if ALPINE_PIN_FILE="$test_dir/unsafe-alpine-path.toml" scripts/check-alpine-pin.
     exit 1
 fi
 
+sed 's|sequence_manifest_path = "assurance/qualification/sequences/atlas-lifecycle-v1.toml"|sequence_manifest_path = "../sequence.toml"|' pins/alpine.toml > "$test_dir/unsafe-alpine-sequence-path.toml"
+if ALPINE_PIN_FILE="$test_dir/unsafe-alpine-sequence-path.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
+    printf 'unsafe Alpine sequence manifest path unexpectedly passed\n' >&2
+    exit 1
+fi
+
 cp pins/alpine-traces.tsv "$test_dir/corrupt-alpine-traces.tsv"
 printf 'unreviewed\n' >> "$test_dir/corrupt-alpine-traces.tsv"
 if ALPINE_TRACE_MANIFEST_FILE="$test_dir/corrupt-alpine-traces.tsv" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
@@ -43,6 +49,45 @@ fi
 sed 's/afa696780de42292510c3b19bd60602149455fd921ceefc3f6e7f0dcf00b67d4/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' pins/alpine.toml > "$test_dir/wrong-alpine-manifest-hash.toml"
 if ALPINE_PIN_FILE="$test_dir/wrong-alpine-manifest-hash.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
     printf 'wrong Alpine trace manifest fingerprint unexpectedly passed\n' >&2
+    exit 1
+fi
+
+cat > "$test_dir/alpine-sequence.toml" <<'EOF'
+schema = "alpine-scene-trace-sequence/v1"
+id = "editor-atlas-lifecycle"
+task = 353
+
+[[steps]]
+sequence = 0
+transition = "full-admission"
+
+[[steps]]
+sequence = 1
+transition = "compatible-reuse"
+
+[[steps]]
+sequence = 2
+transition = "content-replacement"
+
+[[steps]]
+sequence = 3
+transition = "capacity-replacement"
+
+[[steps]]
+sequence = 4
+transition = "teardown"
+
+[[steps]]
+sequence = 5
+transition = "full-resynchronization"
+EOF
+sequence_fixture_hash=$(shasum -a 256 "$test_dir/alpine-sequence.toml" | awk '{ print $1 }')
+sed "s/2e85ae89b33b6af0d2577b9f4a7f0338b0d3ced81e61e075166cf883b38e12b8/$sequence_fixture_hash/" pins/alpine.toml > "$test_dir/alpine-sequence-fixture.toml"
+ALPINE_PIN_FILE="$test_dir/alpine-sequence-fixture.toml" ALPINE_SEQUENCE_MANIFEST_FILE="$test_dir/alpine-sequence.toml" scripts/check-alpine-pin.sh >/dev/null
+
+sed "s/$sequence_fixture_hash/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/" "$test_dir/alpine-sequence-fixture.toml" > "$test_dir/wrong-alpine-sequence-hash.toml"
+if ALPINE_PIN_FILE="$test_dir/wrong-alpine-sequence-hash.toml" ALPINE_SEQUENCE_MANIFEST_FILE="$test_dir/alpine-sequence.toml" scripts/check-alpine-pin.sh >/dev/null 2>&1; then
+    printf 'wrong Alpine sequence manifest fingerprint unexpectedly passed\n' >&2
     exit 1
 fi
 
@@ -174,6 +219,16 @@ sed 's/retention-days: 90/retention-days: 7/' \
     .github/workflows/ci.yml > "$workflow_root/ci.yml"
 if WORKFLOW_ROOT="$workflow_root" scripts/check-workflows.sh >/dev/null 2>&1; then
     printf 'short qualification retention fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+
+mutation_block=$(sed -n '/^mutation_performed=false/,/^if \[ "$mode"/p' scripts/run-renderer-equivalence.sh)
+printf '%s\n' "$mutation_block" | grep -F -- '--dir "$variant_checkout"' >/dev/null || {
+    printf 'mutation runner does not bind cargo-mutants to the exact variant directory\n' >&2
+    exit 1
+}
+if printf '%s\n' "$mutation_block" | grep -F -- '--manifest-path' >/dev/null; then
+    printf 'mutation runner uses unsupported cargo-mutants manifest input\n' >&2
     exit 1
 fi
 

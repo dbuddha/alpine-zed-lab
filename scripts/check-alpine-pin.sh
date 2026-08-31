@@ -22,10 +22,14 @@ commit=$(pin_value commit)
 visibility=$(pin_value visibility)
 trace_manifest_path=$(pin_value trace_manifest_path)
 trace_manifest_sha256=$(pin_value trace_manifest_sha256)
+sequence_manifest_path=$(pin_value sequence_manifest_path)
+sequence_manifest_sha256=$(pin_value sequence_manifest_sha256)
 
 expected_keys='commit
 repository
 schema
+sequence_manifest_path
+sequence_manifest_sha256
 trace_manifest_path
 trace_manifest_sha256
 visibility'
@@ -35,22 +39,27 @@ actual_keys=$(awk -F '[[:space:]]*=[[:space:]]*' '
     { print $1 }
 ' "$PIN_FILE" | sort)
 [ "$actual_keys" = "$expected_keys" ] || {
-    printf 'Alpine pin schema fields differ from alpine-revision-pin/v2\n' >&2
+    printf 'Alpine pin schema fields differ from alpine-revision-pin/v3\n' >&2
     exit 1
 }
 
-[ "$schema" = "alpine-revision-pin/v2" ] || { printf 'unsupported Alpine pin schema: %s\n' "$schema" >&2; exit 1; }
+[ "$schema" = "alpine-revision-pin/v3" ] || { printf 'unsupported Alpine pin schema: %s\n' "$schema" >&2; exit 1; }
 [ "$repository" = "https://github.com/dbuddha/alpine-gpui.git" ] || { printf 'unexpected Alpine repository: %s\n' "$repository" >&2; exit 1; }
 [ "$visibility" = "public-proprietary" ] || { printf 'unexpected Alpine visibility boundary: %s\n' "$visibility" >&2; exit 1; }
 [ "$trace_manifest_path" = "pins/alpine-traces.tsv" ] || { printf 'unexpected Alpine trace manifest path: %s\n' "$trace_manifest_path" >&2; exit 1; }
+[ "$sequence_manifest_path" = "assurance/qualification/sequences/atlas-lifecycle-v1.toml" ] || { printf 'unexpected Alpine sequence manifest path: %s\n' "$sequence_manifest_path" >&2; exit 1; }
 
 case "$trace_manifest_path" in /*|*..*|*//*|*\\*) printf 'unsafe Alpine trace manifest path: %s\n' "$trace_manifest_path" >&2; exit 1 ;; esac
+case "$sequence_manifest_path" in /*|*..*|*//*|*\\*) printf 'unsafe Alpine sequence manifest path: %s\n' "$sequence_manifest_path" >&2; exit 1 ;; esac
 case "$commit" in *[!0-9a-f]*|'') printf 'commit must be a lowercase hexadecimal SHA\n' >&2; exit 1 ;; esac
 [ "${#commit}" -eq 40 ] || { printf 'commit must contain 40 hexadecimal characters\n' >&2; exit 1; }
 case "$trace_manifest_sha256" in *[!0-9a-f]*|'') printf 'trace manifest identity must be lowercase hexadecimal\n' >&2; exit 1 ;; esac
 [ "${#trace_manifest_sha256}" -eq 64 ] || { printf 'trace manifest identity must contain 64 hexadecimal characters\n' >&2; exit 1; }
+case "$sequence_manifest_sha256" in *[!0-9a-f]*|'') printf 'sequence manifest identity must be lowercase hexadecimal\n' >&2; exit 1 ;; esac
+[ "${#sequence_manifest_sha256}" -eq 64 ] || { printf 'sequence manifest identity must contain 64 hexadecimal characters\n' >&2; exit 1; }
 
 trace_manifest_file=${ALPINE_TRACE_MANIFEST_FILE:-$trace_manifest_path}
+sequence_manifest_file=${ALPINE_SEQUENCE_MANIFEST_FILE:-}
 [ -f "$trace_manifest_file" ] || { printf 'Alpine trace manifest is missing: %s\n' "$trace_manifest_file" >&2; exit 1; }
 actual_manifest_sha256=$(shasum -a 256 "$trace_manifest_file" | awk '{ print $1 }')
 [ "$actual_manifest_sha256" = "$trace_manifest_sha256" ] || { printf 'Alpine trace manifest fingerprint mismatch\n' >&2; exit 1; }
@@ -134,6 +143,31 @@ if [ -e .lab/alpine ] || [ -L .lab/alpine ]; then
             [ "$declared_pair_id" = "$pair_id" ] && [ "$declared_pair_kind" = "$pair_kind" ] && [ "$declared_pair_hash" = "$pair_hash" ] && [ "$declared_pair_step" = "$pair_step" ] && [ "$declared_pair_steps" = "$pair_steps" ] || { printf 'Alpine trace pair identity mismatch for %s\n' "$fixture_id" >&2; exit 1; }
         fi
     done < "$trace_manifest_file"
+
+    if [ -z "$sequence_manifest_file" ]; then
+        sequence_manifest_file=".lab/alpine/$sequence_manifest_path"
+    fi
 fi
 
-printf 'Alpine pin checks passed at %s for eight immutable fixtures\n' "$commit"
+if [ -n "$sequence_manifest_file" ]; then
+    [ -f "$sequence_manifest_file" ] || { printf 'Alpine sequence manifest is missing: %s\n' "$sequence_manifest_file" >&2; exit 1; }
+    actual_sequence_sha=$(shasum -a 256 "$sequence_manifest_file" | awk '{ print $1 }')
+    [ "$actual_sequence_sha" = "$sequence_manifest_sha256" ] || { printf 'Alpine sequence manifest fingerprint mismatch\n' >&2; exit 1; }
+    awk -F '[[:space:]]*=[[:space:]]*' '
+        $1 == "schema" { gsub(/"/, "", $2); schema = $2 }
+        $1 == "id" && id == "" { gsub(/"/, "", $2); id = $2 }
+        $1 == "task" { task = $2 }
+        $1 == "sequence" { if ($2 != steps) { print "sequence steps must be contiguous" > "/dev/stderr"; exit 1 }; steps++ }
+        $1 == "transition" { gsub(/"/, "", $2); transitions = transitions (transitions == "" ? "" : ",") $2 }
+        END {
+            if (schema != "alpine-scene-trace-sequence/v1" || id != "editor-atlas-lifecycle" || task != 353 || steps != 6) {
+                print "sequence manifest identity is invalid" > "/dev/stderr"; exit 1
+            }
+            if (transitions != "full-admission,compatible-reuse,content-replacement,capacity-replacement,teardown,full-resynchronization") {
+                print "sequence manifest transitions are invalid" > "/dev/stderr"; exit 1
+            }
+        }
+    ' "$sequence_manifest_file"
+fi
+
+printf 'Alpine pin checks passed at %s for eight immutable fixtures and one lifecycle sequence\n' "$commit"
