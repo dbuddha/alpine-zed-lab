@@ -15,6 +15,7 @@ case "$output" in artifacts/*) ;; *) fail 'output must be beneath artifacts' ;; 
 
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
+mkdir -p "$repo_root/.lab"
 work=$(mktemp -d "$repo_root/.lab/physical-admission.XXXXXX")
 verified="$work/verified"
 staging="$work/admission"
