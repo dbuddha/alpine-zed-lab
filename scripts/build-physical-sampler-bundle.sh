@@ -55,10 +55,11 @@ done
 [ "${#trace_manifest_sha256}" -eq 64 ] || fail 'trace manifest hash length drifted'
 
 oracle_set="$oracle/qualification-set.toml"
+oracle_fixture="$oracle/realistic-code-viewport/qualification.toml"
 oracle_equivalence="$oracle/realistic-code-viewport/equivalence.log"
 oracle_cpu="$oracle/realistic-code-viewport/cpu-oracle.bgra"
 oracle_gpui="$oracle/realistic-code-viewport/gpui-metal.bgra"
-for file in "$oracle_set" "$oracle_equivalence" "$oracle_cpu" "$oracle_gpui"; do
+for file in "$oracle_set" "$oracle_fixture" "$oracle_equivalence" "$oracle_cpu" "$oracle_gpui"; do
     [ -f "$file" ] && [ ! -L "$file" ] || fail "oracle evidence is missing or symbolic: $file"
 done
 [ "$(toml_value "$oracle_set" schema)" = alpine-renderer-equivalence-set/v2 ] || fail 'oracle schema drifted'
@@ -82,6 +83,26 @@ EOF
 trace_source=".lab/alpine/$trace_path"
 [ -f "$trace_source" ] && [ ! -L "$trace_source" ] || fail 'pinned physical trace is missing'
 [ "$(hash_file "$trace_source")" = "$trace_sha256" ] || fail 'pinned physical trace bytes drifted'
+[ "$(toml_value "$oracle_fixture" schema)" = alpine-renderer-equivalence/v2 ] || fail 'oracle fixture schema drifted'
+[ "$(toml_value "$oracle_fixture" state)" = gpui-oracle-equivalent ] || fail 'oracle fixture state drifted'
+[ "$(toml_value "$oracle_fixture" comparison_level)" = renderer-only ] || fail 'oracle fixture comparison level drifted'
+[ "$(toml_value "$oracle_fixture" lab_revision)" = "$lab_revision" ] || fail 'oracle fixture lab revision drifted'
+[ "$(toml_value "$oracle_fixture" alpine_revision)" = "$alpine_revision" ] || fail 'oracle fixture Alpine revision drifted'
+[ "$(toml_value "$oracle_fixture" zed_revision)" = "$zed_revision" ] || fail 'oracle fixture Zed revision drifted'
+[ "$(toml_value "$oracle_fixture" trace_manifest_sha256)" = "$trace_manifest_sha256" ] || fail 'oracle fixture trace manifest drifted'
+[ "$(toml_value "$oracle_fixture" trace_schema)" = "$trace_schema" ] || fail 'oracle fixture trace schema drifted'
+[ "$(toml_value "$oracle_fixture" trace_id)" = "$trace_id" ] || fail 'oracle fixture trace identity drifted'
+[ "$(toml_value "$oracle_fixture" trace_path)" = "$trace_path" ] || fail 'oracle fixture trace path drifted'
+[ "$(toml_value "$oracle_fixture" scene_trace_sha256)" = "$trace_sha256" ] || fail 'oracle fixture trace hash drifted'
+[ "$(toml_value "$oracle_fixture" workload_hash)" = "$workload_hash" ] || fail 'oracle fixture workload drifted'
+[ "$(toml_value "$oracle_fixture" shader_mode)" = offline-metallib ] || fail 'oracle fixture shader mode drifted'
+[ "$(toml_raw "$oracle_fixture" direct_metal_performed)" = false ] || fail 'hosted oracle fixture unexpectedly performed Direct Metal'
+[ "$(toml_raw "$oracle_fixture" cpu_oracle_equivalence_within_tolerance)" = true ] || fail 'oracle fixture CPU equivalence drifted'
+[ "$(toml_raw "$oracle_fixture" exact_metal_equivalence)" = false ] || fail 'hosted oracle fixture unexpectedly claims full Metal equivalence'
+[ "$(toml_raw "$oracle_fixture" renderer_timing_performed)" = false ] || fail 'oracle fixture unexpectedly contains timing'
+[ "$(toml_raw "$oracle_fixture" performance_qualified)" = false ] || fail 'oracle fixture unexpectedly claims performance qualification'
+[ "$(toml_value "$oracle_fixture" cpu_oracle_sha256)" = "$(hash_file "$oracle_cpu")" ] || fail 'oracle fixture CPU hash drifted'
+[ "$(toml_value "$oracle_fixture" gpui_metal_sha256)" = "$(hash_file "$oracle_gpui")" ] || fail 'oracle fixture GPUI hash drifted'
 
 scripts/check-pin.sh
 scripts/check-alpine-pin.sh
@@ -141,6 +162,7 @@ chmod 755 "$bundle/bin/alpine-assurance" "$bundle/bin/alpine-trace-adapter"
 cp "$alpine_metallib" "$bundle/provenance/alpine-offscreen.metallib"
 cp "$gpui_metallib" "$bundle/provenance/gpui-shaders.metallib"
 cp "$oracle_set" "$bundle/oracle/qualification-set.toml"
+cp "$oracle_fixture" "$bundle/oracle/realistic-code-viewport/qualification.toml"
 cp "$oracle_equivalence" "$bundle/oracle/realistic-code-viewport/equivalence.log"
 cp "$oracle_cpu" "$bundle/oracle/realistic-code-viewport/cpu-oracle.bgra"
 cp "$oracle_gpui" "$bundle/oracle/realistic-code-viewport/gpui-metal.bgra"
@@ -169,6 +191,7 @@ trace_manifest_sha256 = "$trace_manifest_sha256"
 trace_id = "$trace_id"
 trace_schema = "$trace_schema"
 workload_hash = "$workload_hash"
+trace_canonical_path = "$trace_path"
 architecture = "arm64"
 build_profile = "release"
 shader_mode = "offline-metallib"
@@ -182,6 +205,8 @@ gpui_metallib_path = "provenance/gpui-shaders.metallib"
 gpui_metallib_sha256 = "$(hash_file "$bundle/provenance/gpui-shaders.metallib")"
 oracle_set_path = "oracle/qualification-set.toml"
 oracle_set_sha256 = "$(hash_file "$bundle/oracle/qualification-set.toml")"
+oracle_fixture_path = "oracle/realistic-code-viewport/qualification.toml"
+oracle_fixture_sha256 = "$(hash_file "$bundle/oracle/realistic-code-viewport/qualification.toml")"
 oracle_equivalence_path = "oracle/realistic-code-viewport/equivalence.log"
 oracle_equivalence_sha256 = "$(hash_file "$bundle/oracle/realistic-code-viewport/equivalence.log")"
 oracle_cpu_path = "oracle/realistic-code-viewport/cpu-oracle.bgra"

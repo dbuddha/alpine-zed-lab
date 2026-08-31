@@ -17,6 +17,7 @@ hash_file() {
 for file in \
     bin/alpine-assurance bin/alpine-trace-adapter \
     provenance/alpine-offscreen.metallib provenance/gpui-shaders.metallib \
+    oracle/realistic-code-viewport/qualification.toml \
     oracle/realistic-code-viewport/equivalence.log \
     oracle/realistic-code-viewport/cpu-oracle.bgra \
     oracle/realistic-code-viewport/gpui-metal.bgra \
@@ -29,11 +30,38 @@ do
 done
 chmod 755 "$bundle/bin/alpine-assurance" "$bundle/bin/alpine-trace-adapter"
 lab_revision=1111111111111111111111111111111111111111
+alpine_revision=2222222222222222222222222222222222222222
+zed_revision=3333333333333333333333333333333333333333
+trace_manifest_sha256=5555555555555555555555555555555555555555555555555555555555555555
+trace_sha256=$(hash_file "$bundle/source/realistic-code-viewport.toml")
+workload_hash=6666666666666666666666666666666666666666666666666666666666666666
 cat > "$bundle/oracle/qualification-set.toml" <<EOF
 schema = "alpine-renderer-equivalence-set/v2"
 state = "gpui-oracle-equivalent"
 lab_revision = "$lab_revision"
 shader_mode = "offline-metallib"
+performance_qualified = false
+EOF
+cat > "$bundle/oracle/realistic-code-viewport/qualification.toml" <<EOF
+schema = "alpine-renderer-equivalence/v2"
+state = "gpui-oracle-equivalent"
+comparison_level = "renderer-only"
+lab_revision = "$lab_revision"
+zed_revision = "$zed_revision"
+alpine_revision = "$alpine_revision"
+trace_manifest_sha256 = "$trace_manifest_sha256"
+trace_schema = "alpine-scene-trace/v2"
+trace_id = "realistic-code-viewport"
+trace_path = "assurance/qualification/v2/realistic-code-viewport.toml"
+scene_trace_sha256 = "$trace_sha256"
+workload_hash = "$workload_hash"
+cpu_oracle_sha256 = "$(hash_file "$bundle/oracle/realistic-code-viewport/cpu-oracle.bgra")"
+gpui_metal_sha256 = "$(hash_file "$bundle/oracle/realistic-code-viewport/gpui-metal.bgra")"
+shader_mode = "offline-metallib"
+direct_metal_performed = false
+cpu_oracle_equivalence_within_tolerance = true
+exact_metal_equivalence = false
+renderer_timing_performed = false
 performance_qualified = false
 EOF
 
@@ -50,13 +78,14 @@ candidate = true
 lab_revision = "$lab_revision"
 workflow_sha = "$lab_revision"
 workflow_run_id = "12345"
-alpine_revision = "2222222222222222222222222222222222222222"
-zed_revision = "3333333333333333333333333333333333333333"
+alpine_revision = "$alpine_revision"
+zed_revision = "$zed_revision"
 patch_series_sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
-trace_manifest_sha256 = "5555555555555555555555555555555555555555555555555555555555555555"
+trace_manifest_sha256 = "$trace_manifest_sha256"
 trace_id = "realistic-code-viewport"
 trace_schema = "alpine-scene-trace/v2"
-workload_hash = "6666666666666666666666666666666666666666666666666666666666666666"
+workload_hash = "$workload_hash"
+trace_canonical_path = "assurance/qualification/v2/realistic-code-viewport.toml"
 architecture = "arm64"
 build_profile = "release"
 shader_mode = "offline-metallib"
@@ -66,6 +95,7 @@ EOF
     manifest_path alpine_metallib provenance/alpine-offscreen.metallib
     manifest_path gpui_metallib provenance/gpui-shaders.metallib
     manifest_path oracle_set oracle/qualification-set.toml
+    manifest_path oracle_fixture oracle/realistic-code-viewport/qualification.toml
     manifest_path oracle_equivalence oracle/realistic-code-viewport/equivalence.log
     manifest_path oracle_cpu oracle/realistic-code-viewport/cpu-oracle.bgra
     manifest_path oracle_gpui oracle/realistic-code-viewport/gpui-metal.bgra
@@ -121,6 +151,14 @@ ALPINE_BUNDLE_TEST_CI_PASS=success \
 scripts/verify-physical-sampler-bundle.sh \
     "$reference_archive" "$reference_archive.sha256" "$root/output-valid" >/dev/null
 
+missing_fixture="$root/missing-fixture"
+cp -R "$root/reference" "$missing_fixture"
+rm "$missing_fixture/physical-samplers/oracle/realistic-code-viewport/qualification.toml"
+mkdir -p "$root/missing-fixture-artifact"
+missing_fixture_archive="$root/missing-fixture-artifact/physical-samplers.tar"
+make_archive "$missing_fixture" "$missing_fixture_archive"
+assert_rejected missing-fixture "$missing_fixture_archive" "$missing_fixture_archive.sha256"
+
 printf '0  physical-samplers.tar\n' > "$root/bad-checksum"
 assert_rejected checksum "$reference_archive" "$root/bad-checksum"
 if ALPINE_LAB_TESTING=1 ALPINE_BUNDLE_TEST_PLATFORM=linux-x64 \
@@ -132,7 +170,7 @@ then
     exit 1
 fi
 
-for mutation in runtime-shader qualified wrong-hash wrong-oracle; do
+for mutation in runtime-shader qualified wrong-hash wrong-oracle wrong-fixture; do
     fixture="$root/$mutation"
     cp -R "$root/reference" "$fixture"
     case "$mutation" in
@@ -151,6 +189,17 @@ for mutation in runtime-shader qualified wrong-hash wrong-oracle; do
             sed 's/state = "gpui-oracle-equivalent"/state = "rejected"/' \
                 "$fixture/physical-samplers/oracle/qualification-set.toml" > "$fixture/oracle.tmp"
             mv "$fixture/oracle.tmp" "$fixture/physical-samplers/oracle/qualification-set.toml"
+            ;;
+        wrong-fixture)
+            sed 's/state = "gpui-oracle-equivalent"/state = "equivalent"/' \
+                "$fixture/physical-samplers/oracle/realistic-code-viewport/qualification.toml" \
+                > "$fixture/oracle.tmp"
+            mv "$fixture/oracle.tmp" \
+                "$fixture/physical-samplers/oracle/realistic-code-viewport/qualification.toml"
+            new_hash=$(hash_file "$fixture/physical-samplers/oracle/realistic-code-viewport/qualification.toml")
+            sed "s/oracle_fixture_sha256 = \"[0-9a-f]*\"/oracle_fixture_sha256 = \"$new_hash\"/" \
+                "$fixture/physical-samplers/manifest.toml" > "$fixture/manifest.tmp"
+            mv "$fixture/manifest.tmp" "$fixture/physical-samplers/manifest.toml"
             ;;
     esac
     mkdir -p "$root/$mutation-artifact"
