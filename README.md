@@ -150,6 +150,28 @@ CPU oracle. Direct Metal comparison remains a physical-hardware gate because
 Alpine intentionally rejects GitHub's virtual Metal device as a supported
 production target.
 
+### Paired renderer calibration inputs
+
+Task #478 adds one fail-closed command with capture and compose phases. Capture
+requires a clean lab revision, the exact pinned Alpine and Zed identities, a
+leased physical Apple Silicon window, offline shaders, and retained exact Metal
+equivalence for the selected trace. It executes independent Alpine A/A, GPUI
+A/A, and seeded cross-renderer AB/BA lanes while retaining every invocation and
+keeping GPUI adaptation counters outside renderer elapsed samples.
+
+    scripts/run-paired-renderer-samples.sh capture [arguments]
+    scripts/run-paired-renderer-samples.sh compose [arguments]
+
+Compose rejects fewer than twenty complete runs, fewer than four independent
+windows, duplicate seeds or leases, malformed samples, one-sided order,
+identity or stage drift, partial bundles, artifact replacement, and mixed
+environment classes. It emits two manifests accepted by Alpine's
+alpine-aa-calibration/v1 validator plus a separate cross-renderer raw artifact.
+The hosted control uses explicit test-fixture windows and deterministic fake
+samplers, so it proves protocol shape only. Physical distributions, confidence
+intervals, residency, E4 qualification, and every performance claim remain
+owned by Alpine Tasks #470 through #472 and Requirement #53.
+
 ## Authority
 
 - Alpine Capability: <https://github.com/dbuddha/alpine-gpui/issues/28>
