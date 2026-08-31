@@ -1,1 +1,2 @@
 34c962d9ba43ac670b26066dae884acecfe85597e90451d4f616a58fafaba20d patches/alpine-metal/0001-add-gpui-scene-trace-adapter.patch
+f8a6e1a3ba03a75768e2b497b4536b0d7e9768c11b409f108debb601cb4575fa patches/alpine-metal/0002-add-gpui-renderer-sampling.patch

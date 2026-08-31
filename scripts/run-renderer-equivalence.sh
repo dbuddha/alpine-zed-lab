@@ -324,6 +324,33 @@ done < "$trace_manifest"
 
 [ "$fixture_count" -eq 8 ] || { printf 'renderer set must execute eight fixtures\n' >&2; exit 1; }
 
+if [ "$shader_mode" = offline-metallib ]; then
+    sampling_trace_path=$(awk -F "$tab" '$1 == "realistic-code-viewport" { print $3 }' "$trace_manifest")
+    [ -n "$sampling_trace_path" ] || { printf 'realistic code viewport sampling trace is missing\n' >&2; exit 1; }
+    sampling_trace="$repo_root/.lab/alpine/$sampling_trace_path"
+    sampling_dir="$output_absolute/renderer-sampling-smoke"
+    mkdir -p "$sampling_dir"
+    CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" run \
+        --manifest-path "$variant_checkout/Cargo.toml" \
+        --locked \
+        -p alpine_trace_adapter \
+        -- --benchmark "$sampling_trace" "$sampling_dir/gpui-metal.csv" 2 3 \
+        > "$sampling_dir/gpui-metal.log"
+    [ "$(adapter_value schema "$sampling_dir/gpui-metal.log")" = alpine-zed-gpui-renderer-samples/v1 ] || { printf 'GPUI sampling schema drifted\n' >&2; exit 1; }
+    [ "$(adapter_value id "$sampling_dir/gpui-metal.log")" = realistic-code-viewport ] || { printf 'GPUI sampling fixture drifted\n' >&2; exit 1; }
+    [ "$(adapter_value admission_iterations "$sampling_dir/gpui-metal.log")" = 1 ] || { printf 'GPUI sampling admission count drifted\n' >&2; exit 1; }
+    [ "$(adapter_value warmup_iterations "$sampling_dir/gpui-metal.log")" = 2 ] || { printf 'GPUI sampling warmup count drifted\n' >&2; exit 1; }
+    [ "$(adapter_value sample_count "$sampling_dir/gpui-metal.log")" = 3 ] || { printf 'GPUI sampling count drifted\n' >&2; exit 1; }
+    [ "$(adapter_value measurement_stage "$sampling_dir/gpui-metal.log")" = renderer-submit-readback ] || { printf 'GPUI sampling stage drifted\n' >&2; exit 1; }
+    [ "$(adapter_value renderer_timing_performed "$sampling_dir/gpui-metal.log")" = true ] || { printf 'GPUI sampling timing marker drifted\n' >&2; exit 1; }
+    [ "$(adapter_value performance_qualified "$sampling_dir/gpui-metal.log")" = false ] || { printf 'GPUI sampling qualification marker drifted\n' >&2; exit 1; }
+    awk -F, '
+        NR == 1 { if ($1 != "sample_index" || $2 != "elapsed_ns") exit 1; next }
+        $1 != NR - 2 || $2 !~ /^[0-9]+$/ || $2 == 0 { exit 1 }
+        END { if (NR != 4) exit 1 }
+    ' "$sampling_dir/gpui-metal.csv" || { printf 'GPUI sampling CSV drifted\n' >&2; exit 1; }
+fi
+
 sequence_dir="$output_absolute/atlas-lifecycle"
 mkdir -p "$sequence_dir"
 (
