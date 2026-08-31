@@ -112,6 +112,23 @@ identity, teardown, reconstruction, and pixel equivalence. It does not establish
 native GPUI allocation-byte equivalence, full primitive coverage, application
 parity, timing, memory, or superiority.
 
+### Renderer timing samples
+
+The pinned adapter can emit bounded raw GPUI Metal samples after semantic
+admission and declared warmup iterations:
+
+```sh
+alpine_trace_adapter --benchmark TRACE OUTPUT.csv WARMUPS SAMPLES
+```
+
+The command reuses one prepared GPUI scene and one headless renderer, measures
+only renderer submission through synchronous offscreen readback, and publishes
+the strict `sample_index,elapsed_ns` CSV without replacement. Its summary
+separates adaptation counters, one semantic admission iteration, declared
+warmups, clock identity, and sample count. These samples are calibration input,
+not performance qualification or evidence of a product-level claim. Offline
+metallib mode is required; runtime-source shaders are rejected.
+
 To reproduce the source-assurance gates locally, install the pinned
 `cargo-llvm-cov` and `cargo-mutants` versions shown in CI, then run:
 
