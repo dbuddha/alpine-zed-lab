@@ -1661,7 +1661,11 @@ def analyze(arguments: argparse.Namespace) -> None:
         qualification_path, qualification_fields
     )
     require(qualification["schema"] == SET_SCHEMA, "qualification schema drifted")
-    require(qualification["state"] == "protocol-ready", "input is not protocol ready")
+    expected_state = "fixture-only" if arguments.allow_test_fixture else "protocol-ready"
+    require(
+        qualification["state"] == expected_state,
+        f"input state must be {expected_state}",
+    )
     require(
         qualification["comparison_level"] == "renderer-only",
         "comparison level drifted",
@@ -1935,6 +1939,7 @@ def parser() -> argparse.ArgumentParser:
         type=int,
         default=10_000,
     )
+    analyze_parser.add_argument("--allow-test-fixture", action="store_true")
     analyze_parser.set_defaults(handler=analyze)
     return root
 

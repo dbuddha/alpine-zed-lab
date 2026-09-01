@@ -179,6 +179,7 @@ scripts/run-paired-renderer-samples.sh analyze \
     --input "$artifact_root/composed" \
     --output "$artifact_root/composed/statistics.toml" \
     --bootstrap-resamples 1000 \
+    --allow-test-fixture \
     > "$artifact_root/analyze.log"
 grep -Fq 'calibration_complete=true statistics_qualified=false' \
     "$artifact_root/analyze.log"
@@ -191,7 +192,8 @@ grep -Fq 'performance_claim = "none"' "$artifact_root/composed/statistics.toml"
 if scripts/run-paired-renderer-samples.sh analyze \
     --input "$artifact_root/composed" \
     --output "$artifact_root/composed/statistics.toml" \
-    --bootstrap-resamples 1000 >/dev/null 2>&1; then
+    --bootstrap-resamples 1000 \
+    --allow-test-fixture >/dev/null 2>&1; then
     printf 'statistics output collision unexpectedly passed\n' >&2
     exit 1
 fi
