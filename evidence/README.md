@@ -4,5 +4,5 @@ This directory contains small, reviewable evidence records that must remain
 available after GitHub Actions artifacts expire. Generated binaries, upstream
 sources, and large raw artifacts remain outside Git.
 
-- [Physical renderer calibration](physical-calibration/README.md)
-
+- [Physical renderer calibration](physical-calibration/README.md), including
+  protocol-ready raw distributions and deterministic no-claim statistics.

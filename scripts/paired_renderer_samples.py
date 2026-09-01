@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import platform
+import random
 import re
 import shutil
 import subprocess
@@ -23,12 +24,15 @@ SCHEMA = "alpine-zed-paired-renderer-run/v1"
 SET_SCHEMA = "alpine-zed-paired-renderer-samples/v1"
 WINDOW_SCHEMA = "alpine-renderer-window/v1"
 CALIBRATION_SCHEMA = "alpine-aa-calibration/v1"
+STATISTICS_SCHEMA = "alpine-zed-renderer-statistics/v1"
 CSV_HEADER = ["run_id", "pair_index", "order", "base", "candidate"]
 SAMPLE_HEADER = ["sample_index", "elapsed_ns"]
 MINIMUM_RUNS = 20
 MINIMUM_WINDOWS = 4
 MAXIMUM_PAIRS = 1_000
 MAXIMUM_WARMUPS = 100_000
+MINIMUM_BOOTSTRAP_RESAMPLES = 1_000
+MAXIMUM_BOOTSTRAP_RESAMPLES = 100_000
 MEASUREMENT_STAGE = "renderer-submit-readback"
 CLOCK = "process-monotonic-instant"
 ORDER_ALGORITHM = "sha256-balanced-sort-v1"
@@ -978,6 +982,226 @@ def parse_paired_csv(
     return parsed
 
 
+def load_selected_root_fields(path: Path, fields: set[str]) -> dict[str, Any]:
+    regular_file(path, "statistics input manifest")
+    selected: dict[str, Any] = {}
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw_line.strip()
+        if line.startswith("["):
+            break
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, encoded = (part.strip() for part in line.split("=", 1))
+        if key not in fields:
+            continue
+        require(key not in selected, f"{path} duplicates root field {key}")
+        selected[key] = parse_scalar(encoded, path, line_number)
+    missing = fields.difference(selected)
+    require(not missing, f"{path} is missing fields: {', '.join(sorted(missing))}")
+    return selected
+
+
+def load_run_bindings(path: Path) -> dict[str, tuple[str, int]]:
+    bindings: dict[str, tuple[str, int]] = {}
+    current: dict[str, Any] | None = None
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw_line.strip()
+        if line == "[[runs]]":
+            if current is not None:
+                add_run_binding(bindings, current, path)
+            current = {}
+            continue
+        if current is None or not line or line.startswith("#") or "=" not in line:
+            continue
+        key, encoded = (part.strip() for part in line.split("=", 1))
+        if key not in {"id", "window_id", "expected_pairs"}:
+            continue
+        require(key not in current, f"{path} line {line_number} duplicates {key}")
+        current[key] = parse_scalar(encoded, path, line_number)
+    if current is not None:
+        add_run_binding(bindings, current, path)
+    require(bindings, f"{path} contains no run bindings")
+    return bindings
+
+
+def add_run_binding(
+    bindings: dict[str, tuple[str, int]], record: dict[str, Any], path: Path
+) -> None:
+    require(
+        set(record) == {"id", "window_id", "expected_pairs"},
+        f"{path} contains an incomplete run binding",
+    )
+    run_id = record["id"]
+    window_id = record["window_id"]
+    expected_pairs = record["expected_pairs"]
+    require(valid_slug(run_id), f"{path} contains an invalid run identifier")
+    require(valid_slug(window_id), f"{path} contains an invalid window identifier")
+    require(
+        isinstance(expected_pairs, int) and 2 <= expected_pairs <= MAXIMUM_PAIRS,
+        f"{path} contains an invalid run pair count",
+    )
+    require(run_id not in bindings, f"{path} duplicates run {run_id}")
+    bindings[run_id] = (window_id, expected_pairs)
+
+
+def parse_composed_csv(
+    path: Path, bindings: dict[str, tuple[str, int]]
+) -> list[tuple[str, int, str, int, int]]:
+    regular_file(path, "composed paired CSV")
+    with path.open(newline="", encoding="utf-8") as source:
+        rows = list(csv.reader(source))
+    require(rows and rows[0] == CSV_HEADER, "composed paired CSV header drifted")
+    parsed: list[tuple[str, int, str, int, int]] = []
+    by_run: dict[str, list[tuple[str, int, str, int, int]]] = {}
+    seen: set[tuple[str, int]] = set()
+    for line_number, row in enumerate(rows[1:], start=2):
+        require(len(row) == len(CSV_HEADER), f"paired CSV line {line_number} drifted")
+        run_id, pair_index, order, base, candidate = row
+        require(run_id in bindings, f"paired CSV line {line_number} has unknown run")
+        require(pair_index.isdigit(), f"paired CSV line {line_number} index is invalid")
+        index = int(pair_index)
+        require((run_id, index) not in seen, f"paired CSV line {line_number} is duplicate")
+        require(
+            order in ("base-first", "candidate-first"),
+            f"paired CSV line {line_number} order is invalid",
+        )
+        require(
+            base.isdigit() and int(base) > 0,
+            f"paired CSV line {line_number} base is invalid",
+        )
+        require(
+            candidate.isdigit() and int(candidate) > 0,
+            f"paired CSV line {line_number} candidate is invalid",
+        )
+        value = (run_id, index, order, int(base), int(candidate))
+        parsed.append(value)
+        by_run.setdefault(run_id, []).append(value)
+        seen.add((run_id, index))
+    require(set(by_run) == set(bindings), "composed paired CSV run set drifted")
+    for run_id, (_, expected_pairs) in bindings.items():
+        run_rows = sorted(by_run[run_id], key=lambda row: row[1])
+        require(len(run_rows) == expected_pairs, f"run {run_id} pair count drifted")
+        require(
+            [row[1] for row in run_rows] == list(range(expected_pairs)),
+            f"run {run_id} pair indices drifted",
+        )
+        orders = [row[2] for row in run_rows]
+        require(
+            "base-first" in orders and "candidate-first" in orders,
+            f"run {run_id} order became one-sided",
+        )
+    return parsed
+
+
+def nearest_rank(values: list[int], basis_points: int) -> int:
+    require(values, "percentile input cannot be empty")
+    require(1 <= basis_points <= 10_000, "percentile basis points are invalid")
+    ordered = sorted(values)
+    rank = (basis_points * len(ordered) + 9_999) // 10_000
+    return ordered[rank - 1]
+
+
+def rounded_ratio(numerator: int, denominator: int) -> int:
+    require(denominator > 0, "ratio denominator must be positive")
+    if numerator >= 0:
+        return (numerator + denominator // 2) // denominator
+    return -((-numerator + denominator // 2) // denominator)
+
+
+def bootstrap_median_interval(
+    values: list[int], seed: str, resamples: int
+) -> tuple[int, int]:
+    require(valid_sha256(seed), "bootstrap seed must be a lowercase SHA-256")
+    require(
+        MINIMUM_BOOTSTRAP_RESAMPLES <= resamples <= MAXIMUM_BOOTSTRAP_RESAMPLES,
+        "bootstrap resample count is outside bounds",
+    )
+    generator = random.Random(int(seed, 16))
+    estimates = []
+    for _ in range(resamples):
+        sample = [values[generator.randrange(len(values))] for _ in values]
+        estimates.append(nearest_rank(sample, 5_000))
+    return nearest_rank(estimates, 250), nearest_rank(estimates, 9_750)
+
+
+def lane_statistics(
+    rows: list[tuple[str, int, str, int, int]], seed: str, resamples: int
+) -> dict[str, int]:
+    require(rows, "statistics lane cannot be empty")
+    base = [row[3] for row in rows]
+    candidate = [row[4] for row in rows]
+    deltas = [candidate_value - base_value for base_value, candidate_value in zip(base, candidate)]
+    relative = [
+        rounded_ratio((candidate_value - base_value) * 1_000_000, base_value)
+        for base_value, candidate_value in zip(base, candidate)
+    ]
+    delta_low, delta_high = bootstrap_median_interval(
+        deltas, hashlib.sha256(f"{seed}:delta".encode()).hexdigest(), resamples
+    )
+    relative_low, relative_high = bootstrap_median_interval(
+        relative, hashlib.sha256(f"{seed}:relative".encode()).hexdigest(), resamples
+    )
+    return {
+        "sample_count": len(rows),
+        "base_p50_ns": nearest_rank(base, 5_000),
+        "base_p95_ns": nearest_rank(base, 9_500),
+        "base_p99_ns": nearest_rank(base, 9_900),
+        "candidate_p50_ns": nearest_rank(candidate, 5_000),
+        "candidate_p95_ns": nearest_rank(candidate, 9_500),
+        "candidate_p99_ns": nearest_rank(candidate, 9_900),
+        "paired_delta_p50_ns": nearest_rank(deltas, 5_000),
+        "paired_delta_ci95_low_ns": delta_low,
+        "paired_delta_ci95_high_ns": delta_high,
+        "paired_relative_delta_p50_ppm": nearest_rank(relative, 5_000),
+        "paired_relative_delta_ci95_low_ppm": relative_low,
+        "paired_relative_delta_ci95_high_ppm": relative_high,
+        "paired_absolute_delta_p95_ns": nearest_rank([abs(value) for value in deltas], 9_500),
+        "paired_absolute_relative_delta_p95_ppm": nearest_rank(
+            [abs(value) for value in relative], 9_500
+        ),
+    }
+
+
+def render_statistics_record(
+    heading: str,
+    identifier: str,
+    base_renderer: str,
+    candidate_renderer: str,
+    statistics: dict[str, int],
+    *,
+    window_id: str | None = None,
+    raw_artifact: str | None = None,
+    raw_sha256: str | None = None,
+) -> list[str]:
+    lines = [
+        heading,
+        f"id = {toml_string(identifier)}",
+    ]
+    if window_id is not None:
+        lines.append(f"window_id = {toml_string(window_id)}")
+    lines.extend(
+        [
+            f"base_renderer = {toml_string(base_renderer)}",
+            f"candidate_renderer = {toml_string(candidate_renderer)}",
+        ]
+    )
+    if raw_artifact is not None and raw_sha256 is not None:
+        lines.extend(
+            [
+                f"raw_artifact = {toml_string(raw_artifact)}",
+                f"raw_sha256 = {toml_string(raw_sha256)}",
+            ]
+        )
+    for key, value in statistics.items():
+        lines.append(f"{key} = {value}")
+    lines.append("")
+    return lines
+
+
 def load_run(path_value: str) -> dict[str, Any]:
     path = artifact_path(path_value, must_exist=True)
     manifest_path = path / "run.toml"
@@ -1386,6 +1610,291 @@ def compose(arguments: argparse.Namespace) -> None:
     )
 
 
+def analyze(arguments: argparse.Namespace) -> None:
+    input_root = artifact_path(arguments.input, must_exist=True)
+    output = ROOT / normal_relative(arguments.output, prefix="artifacts")
+    reject_symlink_path(output)
+    require(output.parent == input_root, "statistics output must stay inside its input")
+    require(not output.exists(), f"statistics output already exists: {arguments.output}")
+    require(
+        MINIMUM_BOOTSTRAP_RESAMPLES
+        <= arguments.bootstrap_resamples
+        <= MAXIMUM_BOOTSTRAP_RESAMPLES,
+        "bootstrap resample count is outside bounds",
+    )
+
+    qualification_path = input_root / "qualification.toml"
+    qualification_fields = {
+        "schema",
+        "state",
+        "comparison_level",
+        "lab_revision",
+        "zed_revision",
+        "alpine_revision",
+        "trace_schema",
+        "trace_id",
+        "scene_trace_sha256",
+        "workload_hash",
+        "measurement_stage",
+        "clock",
+        "run_count",
+        "window_count",
+        "pair_count",
+        "alpine_aa_manifest",
+        "alpine_aa_manifest_sha256",
+        "gpui_aa_manifest",
+        "gpui_aa_manifest_sha256",
+        "cross_artifact",
+        "cross_sha256",
+        "adaptation_artifact",
+        "adaptation_sha256",
+        "semantic_equivalence_required",
+        "aa_controls_validated",
+        "adaptation_timing_performed",
+        "renderer_timing_performed",
+        "residency_qualified",
+        "statistics_qualified",
+        "performance_qualified",
+        "performance_claim",
+    }
+    qualification = load_selected_root_fields(
+        qualification_path, qualification_fields
+    )
+    require(qualification["schema"] == SET_SCHEMA, "qualification schema drifted")
+    require(qualification["state"] == "protocol-ready", "input is not protocol ready")
+    require(
+        qualification["comparison_level"] == "renderer-only",
+        "comparison level drifted",
+    )
+    require(
+        qualification["run_count"] >= MINIMUM_RUNS,
+        "statistics require the minimum run count",
+    )
+    require(
+        qualification["window_count"] >= MINIMUM_WINDOWS,
+        "statistics require the minimum window count",
+    )
+    require(
+        qualification["pair_count"] >= qualification["run_count"] * 2,
+        "statistics require at least two pairs per run",
+    )
+    require(
+        qualification["semantic_equivalence_required"] is True
+        and qualification["aa_controls_validated"] is True,
+        "statistics require semantic equivalence and valid A/A controls",
+    )
+    require(
+        qualification["adaptation_timing_performed"] is False
+        and qualification["renderer_timing_performed"] is True,
+        "statistics input mixed stages or omitted renderer timing",
+    )
+    require(
+        qualification["residency_qualified"] is False
+        and qualification["statistics_qualified"] is False
+        and qualification["performance_qualified"] is False
+        and qualification["performance_claim"] == "none",
+        "statistics input crossed the no-claim boundary",
+    )
+    for field in ("lab_revision", "zed_revision", "alpine_revision"):
+        require(valid_git_sha(qualification[field]), f"qualification {field} drifted")
+    for field in (
+        "scene_trace_sha256",
+        "workload_hash",
+        "alpine_aa_manifest_sha256",
+        "gpui_aa_manifest_sha256",
+        "cross_sha256",
+        "adaptation_sha256",
+    ):
+        require(valid_sha256(qualification[field]), f"qualification {field} drifted")
+
+    bindings = load_run_bindings(qualification_path)
+    require(
+        len(bindings) == qualification["run_count"],
+        "qualification run count does not match its bindings",
+    )
+    windows = {window_id for window_id, _ in bindings.values()}
+    require(
+        len(windows) == qualification["window_count"],
+        "qualification window count does not match its bindings",
+    )
+
+    aa_fields = {
+        "schema",
+        "workload_hash",
+        "base_renderer",
+        "candidate_renderer",
+        "measurement_stage",
+        "clock",
+        "raw_samples_artifact",
+        "raw_samples_sha256",
+    }
+    lane_inputs = []
+    for lane_id, manifest_field, manifest_hash_field in (
+        ("alpine-aa", "alpine_aa_manifest", "alpine_aa_manifest_sha256"),
+        ("gpui-aa", "gpui_aa_manifest", "gpui_aa_manifest_sha256"),
+    ):
+        relative = normal_relative(qualification[manifest_field])
+        require(len(relative.parts) == 1, f"{lane_id} manifest path drifted")
+        manifest_path = input_root / relative
+        require(
+            sha256_file(manifest_path) == qualification[manifest_hash_field],
+            f"{lane_id} manifest hash drifted",
+        )
+        manifest = load_selected_root_fields(manifest_path, aa_fields)
+        require(manifest["schema"] == CALIBRATION_SCHEMA, f"{lane_id} schema drifted")
+        require(
+            manifest["workload_hash"] == qualification["workload_hash"],
+            f"{lane_id} workload drifted",
+        )
+        require(
+            manifest["measurement_stage"] == qualification["measurement_stage"]
+            and manifest["clock"] == qualification["clock"],
+            f"{lane_id} timing identity drifted",
+        )
+        require(
+            manifest["base_renderer"] == manifest["candidate_renderer"],
+            f"{lane_id} is not an A/A lane",
+        )
+        raw_relative = normal_relative(
+            manifest["raw_samples_artifact"], prefix="artifacts"
+        )
+        raw_path = ROOT / raw_relative
+        require(
+            raw_path.parent == input_root / "raw",
+            f"{lane_id} raw path drifted",
+        )
+        require(
+            sha256_file(raw_path) == manifest["raw_samples_sha256"],
+            f"{lane_id} raw hash drifted",
+        )
+        lane_inputs.append(
+            (
+                lane_id,
+                manifest["base_renderer"],
+                manifest["candidate_renderer"],
+                raw_path.relative_to(input_root).as_posix(),
+                manifest["raw_samples_sha256"],
+                parse_composed_csv(raw_path, bindings),
+            )
+        )
+
+    cross_relative = normal_relative(qualification["cross_artifact"])
+    require(
+        len(cross_relative.parts) == 2 and cross_relative.parts[0] == "raw",
+        "cross-renderer raw path drifted",
+    )
+    cross_path = input_root / cross_relative
+    require(
+        sha256_file(cross_path) == qualification["cross_sha256"],
+        "cross-renderer raw hash drifted",
+    )
+    lane_inputs.append(
+        (
+            "alpine-gpui",
+            "alpine-direct-metal",
+            "zed-gpui-metal",
+            cross_relative.as_posix(),
+            qualification["cross_sha256"],
+            parse_composed_csv(cross_path, bindings),
+        )
+    )
+    adaptation_relative = normal_relative(qualification["adaptation_artifact"])
+    require(len(adaptation_relative.parts) == 1, "adaptation path drifted")
+    require(
+        sha256_file(input_root / adaptation_relative)
+        == qualification["adaptation_sha256"],
+        "adaptation hash drifted",
+    )
+    require(
+        all(len(rows) == qualification["pair_count"] for *_, rows in lane_inputs),
+        "statistics lane pair count drifted",
+    )
+
+    qualification_sha256 = sha256_file(qualification_path)
+    lines = [
+        f"schema = {toml_string(STATISTICS_SCHEMA)}",
+        'state = "calibrated"',
+        'comparison_level = "renderer-only"',
+        f"lab_revision = {toml_string(qualification['lab_revision'])}",
+        f"zed_revision = {toml_string(qualification['zed_revision'])}",
+        f"alpine_revision = {toml_string(qualification['alpine_revision'])}",
+        f"trace_schema = {toml_string(qualification['trace_schema'])}",
+        f"trace_id = {toml_string(qualification['trace_id'])}",
+        f"scene_trace_sha256 = {toml_string(qualification['scene_trace_sha256'])}",
+        f"workload_hash = {toml_string(qualification['workload_hash'])}",
+        f"measurement_stage = {toml_string(qualification['measurement_stage'])}",
+        f"clock = {toml_string(qualification['clock'])}",
+        'source_qualification = "qualification.toml"',
+        f"source_qualification_sha256 = {toml_string(qualification_sha256)}",
+        f"run_count = {qualification['run_count']}",
+        f"window_count = {qualification['window_count']}",
+        f"pair_count_per_lane = {qualification['pair_count']}",
+        f"bootstrap_resamples = {arguments.bootstrap_resamples}",
+        'bootstrap_seed = "sha256(qualification-sha256:lane-id[:window-id])"',
+        'confidence_interval = "paired-bootstrap-median-95-percent"',
+        'percentile_method = "nearest-rank"',
+        'effect_size = "paired-median-relative-delta-parts-per-million"',
+        'direction = "lower-is-better"',
+        "semantic_equivalence_required = true",
+        "aa_controls_validated = true",
+        "calibration_complete = true",
+        "statistics_computed = true",
+        "statistics_qualified = false",
+        "residency_qualified = false",
+        "performance_qualified = false",
+        'performance_claim = "none"',
+        'exclusions = ["No residency result, product latency result, optical result, or dominance claim.", "Intervals describe this pinned corpus and are not a universal framework claim."]',
+        "",
+    ]
+    for lane_id, base_renderer, candidate_renderer, raw_path, raw_hash, rows in lane_inputs:
+        lane_seed = hashlib.sha256(
+            f"{qualification_sha256}:{lane_id}".encode()
+        ).hexdigest()
+        lines.extend(
+            render_statistics_record(
+                "[[lanes]]",
+                lane_id,
+                base_renderer,
+                candidate_renderer,
+                lane_statistics(rows, lane_seed, arguments.bootstrap_resamples),
+                raw_artifact=raw_path,
+                raw_sha256=raw_hash,
+            )
+        )
+        for window_id in sorted(windows):
+            window_rows = [row for row in rows if bindings[row[0]][0] == window_id]
+            window_seed = hashlib.sha256(
+                f"{qualification_sha256}:{lane_id}:{window_id}".encode()
+            ).hexdigest()
+            lines.extend(
+                render_statistics_record(
+                    "[[window_lanes]]",
+                    f"{lane_id}-{window_id}",
+                    base_renderer,
+                    candidate_renderer,
+                    lane_statistics(
+                        window_rows, window_seed, arguments.bootstrap_resamples
+                    ),
+                    window_id=window_id,
+                )
+            )
+    temporary = output.with_name(f".{output.name}.tmp")
+    require(not temporary.exists(), f"statistics temporary output exists: {temporary}")
+    complete = False
+    try:
+        temporary.write_text("\n".join(lines), encoding="utf-8")
+        os.replace(temporary, output)
+        complete = True
+    finally:
+        if not complete:
+            temporary.unlink(missing_ok=True)
+    print(
+        f"analyzed {qualification['run_count']} runs across "
+        f"{qualification['window_count']} windows; calibration_complete=true "
+        "statistics_qualified=false performance_qualified=false performance_claim=none"
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     subcommands = root.add_subparsers(dest="command", required=True)
@@ -1414,6 +1923,19 @@ def parser() -> argparse.ArgumentParser:
     compose_parser.add_argument("--run", action="append", required=True)
     compose_parser.add_argument("--alpine-assurance", required=True)
     compose_parser.set_defaults(handler=compose)
+
+    analyze_parser = subcommands.add_parser(
+        "analyze",
+        help="analyze one protocol-ready paired corpus without making a claim",
+    )
+    analyze_parser.add_argument("--input", required=True)
+    analyze_parser.add_argument("--output", required=True)
+    analyze_parser.add_argument(
+        "--bootstrap-resamples",
+        type=int,
+        default=10_000,
+    )
+    analyze_parser.set_defaults(handler=analyze)
     return root
 
 

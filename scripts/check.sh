@@ -16,6 +16,7 @@ scripts/check-alpine-pin.sh
 scripts/check-license-boundary.sh
 scripts/check-adapter-patch.sh
 scripts/check-workflows.sh
+scripts/check-retained-evidence.sh
 tests/workflow-gate.sh
 tests/physical-sampler-bundle.sh
 tests/policy.sh

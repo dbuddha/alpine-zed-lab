@@ -1,0 +1,13 @@
+schema = "alpine-zed-gpui-adaptation/v1"
+trace_id = "realistic-code-viewport"
+workload_hash = "78ae6f66191128422c880a4ee8f9cb6d8b86f44ea0d5ff7af3832ecd37864efe"
+adaptation_timing_performed = false
+adaptation_clips = 1
+adaptation_operations = 11
+adaptation_quads = 4
+adaptation_glyphs = 7
+adaptation_resources = 1
+adaptation_resource_bytes = 64
+adaptation_atlas_allocations = 1
+renderer_timing_included = false
+performance_qualified = false

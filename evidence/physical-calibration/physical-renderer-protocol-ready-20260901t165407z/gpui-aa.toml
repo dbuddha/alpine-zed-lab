@@ -1,0 +1,219 @@
+schema = "alpine-aa-calibration/v1"
+id = "zed-gpui-metal-aa"
+comparison_level = "renderer-only"
+workload_hash = "78ae6f66191128422c880a4ee8f9cb6d8b86f44ea0d5ff7af3832ecd37864efe"
+base_renderer = "zed-gpui-metal"
+candidate_renderer = "zed-gpui-metal"
+base_revision = "f6aa2c2ebab3774e3871c7771e0eb73955a5645a"
+candidate_revision = "f6aa2c2ebab3774e3871c7771e0eb73955a5645a"
+metric = "frame-wall-time"
+unit = "nanoseconds"
+direction = "lower-is-better"
+measurement_stage = "renderer-submit-readback"
+clock = "process-monotonic-instant"
+sample_class = "warm"
+warmup_iterations = 3
+raw_samples_artifact = "artifacts/physical-renderer-protocol-ready-20260901t165407z/raw/gpui-aa.csv"
+raw_samples_sha256 = "7176ba38716fb0cf980e5a0f46c8b0fc8c2b12ae2b7880b24085baadba3c3ef1"
+assumptions = ["Semantic and exact Metal equivalence passed before sampling.", "Each capture used one immutable prepared scene and one declared renderer-submit-readback stage."]
+exclusions = ["No confidence interval, effect-size decision, residency result, product latency result, or performance claim.", "Test-fixture windows prove protocol shape only; leased physical windows remain required for E4."]
+
+[[windows]]
+id = "window-01"
+lease_id = "physical-m4-f6aa2c2-1788238552-window-01"
+environment_kind = "leased-physical"
+hardware_id = "mac16-1-apple-m4-24gb"
+hardware_model = "Mac16,1"
+gpu = "Apple M4"
+memory_bytes = 25769803776
+os_build = "macOS-26.6.2-25G83"
+xcode_build = "command-line-tools-26.5-sdk-25F70"
+rustc = "alpine-1.97.1-8bab26f4-gpui-1.95.0-59807616"
+runner_image = "local-physical-codex-session"
+power_state = "battery-93-percent-discharging"
+thermal_policy = "no-recorded-thermal-or-performance-warning"
+display_state = "offscreen-built-in-liquid-retina-xdr"
+shader_mode = "offline-metallib"
+validation_enabled = false
+started_at_utc = "2026-09-01T04:55:52Z"
+ended_at_utc = "2026-09-01T05:25:52Z"
+
+[[windows]]
+id = "window-02"
+lease_id = "physical-m4-f6aa2c2-20260901t165407z-window-02"
+environment_kind = "leased-physical"
+hardware_id = "mac16-1-apple-m4-24gb"
+hardware_model = "Mac16,1"
+gpu = "Apple M4"
+memory_bytes = 25769803776
+os_build = "macOS-26.6.2-25G83"
+xcode_build = "command-line-tools-26.5-sdk-25F70"
+rustc = "alpine-1.97.1-8bab26f4-gpui-1.95.0-59807616"
+runner_image = "local-physical-codex-session"
+power_state = "battery-100-percent-discharging"
+thermal_policy = "no-recorded-thermal-or-performance-warning"
+display_state = "offscreen-built-in-liquid-retina-xdr"
+shader_mode = "offline-metallib"
+validation_enabled = false
+started_at_utc = "2026-09-01T16:54:07Z"
+ended_at_utc = "2026-09-01T16:54:52Z"
+
+[[windows]]
+id = "window-03"
+lease_id = "physical-m4-f6aa2c2-20260901t165407z-window-03"
+environment_kind = "leased-physical"
+hardware_id = "mac16-1-apple-m4-24gb"
+hardware_model = "Mac16,1"
+gpu = "Apple M4"
+memory_bytes = 25769803776
+os_build = "macOS-26.6.2-25G83"
+xcode_build = "command-line-tools-26.5-sdk-25F70"
+rustc = "alpine-1.97.1-8bab26f4-gpui-1.95.0-59807616"
+runner_image = "local-physical-codex-session"
+power_state = "battery-100-percent-discharging"
+thermal_policy = "no-recorded-thermal-or-performance-warning"
+display_state = "offscreen-built-in-liquid-retina-xdr"
+shader_mode = "offline-metallib"
+validation_enabled = false
+started_at_utc = "2026-09-01T16:54:53Z"
+ended_at_utc = "2026-09-01T16:55:38Z"
+
+[[windows]]
+id = "window-04"
+lease_id = "physical-m4-f6aa2c2-20260901t165407z-window-04"
+environment_kind = "leased-physical"
+hardware_id = "mac16-1-apple-m4-24gb"
+hardware_model = "Mac16,1"
+gpu = "Apple M4"
+memory_bytes = 25769803776
+os_build = "macOS-26.6.2-25G83"
+xcode_build = "command-line-tools-26.5-sdk-25F70"
+rustc = "alpine-1.97.1-8bab26f4-gpui-1.95.0-59807616"
+runner_image = "local-physical-codex-session"
+power_state = "battery-100-percent-discharging"
+thermal_policy = "no-recorded-thermal-or-performance-warning"
+display_state = "offscreen-built-in-liquid-retina-xdr"
+shader_mode = "offline-metallib"
+validation_enabled = false
+started_at_utc = "2026-09-01T16:55:39Z"
+ended_at_utc = "2026-09-01T16:56:24Z"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-1788238552"
+window_id = "window-01"
+randomization_seed = "1e98eb37a7a2f3e06188493a9c45ee2bc78267e05c3d05e6fab42c31cf28f7a4"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r1-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "989a33e6be9e1cd3874c834c7e53487028ee43ea01baf7939e4f7edc284a4008"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r2-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "e6f5a02e9af76d43374945786cf9b7765fb213ad0c022256c6a9482232076e00"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r3-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "dfd3915920a56b5e64fed592e8a6381a1f8c733f8f768cc5dacecbcc77a1d63b"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r4-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "d856ea8e5afb84c7af1b1c44d57664fb473726994cd55d18108d8c159c81b07b"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r5-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "4046e1379238ad11b0eda4a1b8a95cd3eafc228045c40f4cb6f953561c2234f6"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r6-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "4045d51ba49a9a925a89eca4b60ac993665182ce0eb2131f61c587b38db6cb21"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r7-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "dae41efd32b061e3f2ae542a3e5dcc6003262e36e4943b29047ba4afb1857d44"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r1-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "a71666c0eb4405c4c9b995cadf8a2e13d8419c2bea0758ad39570253c6f45a48"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r2-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "65e8d479dbb1bf29b038dd33d395469831c6cc1ab7f6b9ee39b20350ceb65cf5"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r3-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "613f76f6f442f19d71930c9aa07fa1ce6a7974fc875b9bbcaee7a82b44cea74d"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r4-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "41ade772c37edfa35e36c5c646c51569f5f2cde93e9b712ca9fa6cd9255b536d"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r5-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "58bc1ac63de3f112e51b137eaf841637a246e1b71613610ecd295067d91b33fa"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r6-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "96f0950d34019d69b6e390bbc9b67a126537ec300a0dfbbc5ea2492d44bd8ab6"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r1-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "71ca4b2ff559cdc4bbcffbcc3ebe7c5ae4932f766ddf1d73d82520748f35bdca"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r2-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "87b7c2980798adc211c61e99459b8fcf3bb185fd13c4b618ea8b2e2a61e28248"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r3-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "617d899a46815d31593b3e76f22737f4bd6db945d4a588ee8a56e2743c551612"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r4-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "8ed061be3f03ddd7a7432f4e6874dda6929a4fdff5544750a7c272f29235a74b"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r5-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "53485164ff81c87f1252c87082a519d6d4e6108e1e0707f489bc0677c1cf97f7"
+expected_pairs = 2
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r6-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "13db2e31be5d6e1c36b9804f6f9f0d2d9779f75a1fc932ae4db9a035dc0f78ba"
+expected_pairs = 2
