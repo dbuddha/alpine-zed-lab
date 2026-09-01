@@ -175,6 +175,28 @@ grep -Fq 'schema = "alpine-zed-paired-renderer-samples/v1"' "$artifact_root/comp
 grep -Fq 'performance_qualified = false' "$artifact_root/composed/qualification.toml"
 grep -Fq 'no performance claim' "$artifact_root/composed/alpine-aa-validation.log"
 grep -Fq 'no performance claim' "$artifact_root/composed/gpui-aa-validation.log"
+scripts/run-paired-renderer-samples.sh analyze \
+    --input "$artifact_root/composed" \
+    --output "$artifact_root/composed/statistics.toml" \
+    --bootstrap-resamples 1000 \
+    --allow-test-fixture \
+    > "$artifact_root/analyze.log"
+grep -Fq 'calibration_complete=true statistics_qualified=false' \
+    "$artifact_root/analyze.log"
+grep -Fq 'schema = "alpine-zed-renderer-statistics/v1"' \
+    "$artifact_root/composed/statistics.toml"
+grep -Fq 'window_count = 4' "$artifact_root/composed/statistics.toml"
+grep -Fq 'statistics_qualified = false' "$artifact_root/composed/statistics.toml"
+grep -Fq 'performance_claim = "none"' "$artifact_root/composed/statistics.toml"
+
+if scripts/run-paired-renderer-samples.sh analyze \
+    --input "$artifact_root/composed" \
+    --output "$artifact_root/composed/statistics.toml" \
+    --bootstrap-resamples 1000 \
+    --allow-test-fixture >/dev/null 2>&1; then
+    printf 'statistics output collision unexpectedly passed\n' >&2
+    exit 1
+fi
 
 if scripts/run-paired-renderer-samples.sh capture \
     --output "$artifact_root/runs/run-01" \

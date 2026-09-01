@@ -1,0 +1,178 @@
+schema = "alpine-zed-paired-renderer-samples/v1"
+state = "protocol-ready"
+comparison_level = "renderer-only"
+lab_revision = "f6aa2c2ebab3774e3871c7771e0eb73955a5645a"
+zed_revision = "e17dc4f9d50db73a458b64dcce50ecd4878b98a3"
+alpine_revision = "2fdf5aa283e7d773203a76b394ed2e62428c16e4"
+trace_manifest_sha256 = "afa696780de42292510c3b19bd60602149455fd921ceefc3f6e7f0dcf00b67d4"
+patch_series_sha256 = "1abb78ac3f54b25afe185480f97f35a6866e79b600ca5802167d87e8970bf6d4"
+trace_schema = "alpine-scene-trace/v2"
+trace_id = "realistic-code-viewport"
+trace_path = "assurance/qualification/v2/code-viewport.toml"
+scene_trace_sha256 = "6991f75bf19536543c67e90cfa2b6c974a443ff3aad32a40134113ded70b905a"
+workload_hash = "78ae6f66191128422c880a4ee8f9cb6d8b86f44ea0d5ff7af3832ecd37864efe"
+measurement_stage = "renderer-submit-readback"
+clock = "process-monotonic-instant"
+alpine_sampler_sha256 = "59b9c250bc2e3d0acfb4e11b0bfac1626192f5f6b4b7b7e89800ad4d3c4cbcfc"
+gpui_sampler_sha256 = "4e673f3a57a4ef29fe6d4d18502bd53ae3a415ff1e39ffa2582bf3b991c747bc"
+warmup_iterations = 3
+run_count = 20
+window_count = 4
+pair_count = 40
+alpine_aa_manifest = "alpine-aa.toml"
+alpine_aa_manifest_sha256 = "4b5f3ecd0a7d1153e71d3271f96e29584e17e89dcff42a2a9916b4661e66743c"
+gpui_aa_manifest = "gpui-aa.toml"
+gpui_aa_manifest_sha256 = "1a8b4cb3042ca15ec37a03c6a624af45a84f59a8941b139a3f5d2c676d8ae0f0"
+cross_artifact = "raw/alpine-gpui.csv"
+cross_sha256 = "9acfdc05ac968cb73d25a2647bf5b176981212cade891d24d698fb355043ef5a"
+adaptation_artifact = "gpui-adaptation.toml"
+adaptation_sha256 = "7225e21b26dc0f9d586d4fa671c78157e678099a78cd6fc2e0f1cde398751fb5"
+semantic_equivalence_required = true
+aa_controls_validated = true
+adaptation_timing_performed = false
+renderer_timing_performed = true
+residency_qualified = false
+statistics_qualified = false
+performance_qualified = false
+performance_claim = "none"
+exclusions = ["No confidence interval, effect-size decision, residency result, product latency result, or dominance claim.", "Fixture-only output cannot be promoted to physical evidence."]
+
+[[runs]]
+id = "physical-m4-f6aa2c2-1788238552"
+window_id = "window-01"
+randomization_seed = "1e98eb37a7a2f3e06188493a9c45ee2bc78267e05c3d05e6fab42c31cf28f7a4"
+expected_pairs = 2
+run_manifest_sha256 = "de9d48e86d01884069bd090a40ba17f319cab577a806fdf88da46eeb7a103e74"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r1-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "989a33e6be9e1cd3874c834c7e53487028ee43ea01baf7939e4f7edc284a4008"
+expected_pairs = 2
+run_manifest_sha256 = "949f2fa645db66f77932f25f4132ea242ea662553b936a3813238cd1f32ad246"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r2-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "e6f5a02e9af76d43374945786cf9b7765fb213ad0c022256c6a9482232076e00"
+expected_pairs = 2
+run_manifest_sha256 = "4a11ede72123bdb238c8c08de6f18033541cfa6e037d9636f3193a28968e4a17"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r3-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "dfd3915920a56b5e64fed592e8a6381a1f8c733f8f768cc5dacecbcc77a1d63b"
+expected_pairs = 2
+run_manifest_sha256 = "407b6ced3925845d88d6d069155e489d4e49da6d90585a125358cdae91b2174a"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r4-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "d856ea8e5afb84c7af1b1c44d57664fb473726994cd55d18108d8c159c81b07b"
+expected_pairs = 2
+run_manifest_sha256 = "5560158f01382c0886c2f1499a06967bbf9f122fbe3170c6419f4c769776c7b5"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r5-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "4046e1379238ad11b0eda4a1b8a95cd3eafc228045c40f4cb6f953561c2234f6"
+expected_pairs = 2
+run_manifest_sha256 = "032cfd54e10065fe6566173da35b6e255fd18811c939fa743de5c3b574978d80"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r6-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "4045d51ba49a9a925a89eca4b60ac993665182ce0eb2131f61c587b38db6cb21"
+expected_pairs = 2
+run_manifest_sha256 = "fed655630dd45b33589e8c53848ccf43abd81d9fa2b6eda874f09ad1d02404ed"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w02-r7-20260901t165407z"
+window_id = "window-02"
+randomization_seed = "dae41efd32b061e3f2ae542a3e5dcc6003262e36e4943b29047ba4afb1857d44"
+expected_pairs = 2
+run_manifest_sha256 = "fe3a4d413269b98f5ebfc02210cded731efabee4bc2d9e77fe8f35321130056d"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r1-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "a71666c0eb4405c4c9b995cadf8a2e13d8419c2bea0758ad39570253c6f45a48"
+expected_pairs = 2
+run_manifest_sha256 = "93696c4d8a3bd3c4f3481792ae31e69f1bea3e1ad021231bdffd410ace1e322f"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r2-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "65e8d479dbb1bf29b038dd33d395469831c6cc1ab7f6b9ee39b20350ceb65cf5"
+expected_pairs = 2
+run_manifest_sha256 = "9676cef61a56db9fb2dac3deed37f75a161e4f2af1b5e313e898e3572c02a966"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r3-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "613f76f6f442f19d71930c9aa07fa1ce6a7974fc875b9bbcaee7a82b44cea74d"
+expected_pairs = 2
+run_manifest_sha256 = "4477dc1f209ee07e9f9cb12e0451e8a6a283dfb78fc2471615e6cddee98372f6"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r4-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "41ade772c37edfa35e36c5c646c51569f5f2cde93e9b712ca9fa6cd9255b536d"
+expected_pairs = 2
+run_manifest_sha256 = "eda97886fcf6b83bcfc4f0ca8550d628a4e42a85e2b9710821d9c14362041339"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r5-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "58bc1ac63de3f112e51b137eaf841637a246e1b71613610ecd295067d91b33fa"
+expected_pairs = 2
+run_manifest_sha256 = "5bfc1f68a4a3df131189c0449fba87d4d3707ad9f938d8244f1bbd6f5d3bedb7"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w03-r6-20260901t165407z"
+window_id = "window-03"
+randomization_seed = "96f0950d34019d69b6e390bbc9b67a126537ec300a0dfbbc5ea2492d44bd8ab6"
+expected_pairs = 2
+run_manifest_sha256 = "366092787115febf55d5a5fd0bdd70f683ba1bd60c87a997eabc443a9ccc304a"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r1-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "71ca4b2ff559cdc4bbcffbcc3ebe7c5ae4932f766ddf1d73d82520748f35bdca"
+expected_pairs = 2
+run_manifest_sha256 = "d47afb3da70205ec5761de7093b9014bb4d4af19f01e0b968db2a9b5bd4d4eb4"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r2-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "87b7c2980798adc211c61e99459b8fcf3bb185fd13c4b618ea8b2e2a61e28248"
+expected_pairs = 2
+run_manifest_sha256 = "c4553f21935f3b50f44de1d6c2786266c0e7de086bcfad0d2fb20d6821b0d27d"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r3-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "617d899a46815d31593b3e76f22737f4bd6db945d4a588ee8a56e2743c551612"
+expected_pairs = 2
+run_manifest_sha256 = "c65365a596dae2735bed29df890d93787b90e54e50ee3e42c2c148f1ff5e38a3"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r4-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "8ed061be3f03ddd7a7432f4e6874dda6929a4fdff5544750a7c272f29235a74b"
+expected_pairs = 2
+run_manifest_sha256 = "29221a89eb8be7bfdda967e58332cb74bef58ba21149fd186c3bb789d8220c0f"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r5-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "53485164ff81c87f1252c87082a519d6d4e6108e1e0707f489bc0677c1cf97f7"
+expected_pairs = 2
+run_manifest_sha256 = "980a32707863b1923ce658f5e34a60b96481e3aefc434c4bcfe109200a60d6d8"
+
+[[runs]]
+id = "physical-m4-f6aa2c2-w04-r6-20260901t165407z"
+window_id = "window-04"
+randomization_seed = "13db2e31be5d6e1c36b9804f6f9f0d2d9779f75a1fc932ae4db9a035dc0f78ba"
+expected_pairs = 2
+run_manifest_sha256 = "3823e97e10ee2c2d58191a1a7b37acd30e2ab49cbd598c03502bf475f6a671ed"
