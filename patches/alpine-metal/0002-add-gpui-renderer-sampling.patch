@@ -658,7 +658,7 @@ index c8a51168d5..5a7e47ff83 100644
  pub(crate) struct PreparedTrace {
      trace: Trace,
      size: Size<DevicePixels>,
-@@ -759,13 +1141,59 @@ mod tests {
+@@ -759,13 +1141,61 @@ mod tests {
          Point, Size, TileId,
      };
  
@@ -666,6 +666,8 @@ index c8a51168d5..5a7e47ff83 100644
 +    use super::{canonical_workload_hash, decode, render_profile_samples, sha256_hex};
 +    #[cfg(all(target_os = "macos", not(feature = "runtime-shaders")))]
 +    use crate::benchmark_trace_file;
++    #[cfg(target_os = "macos")]
++    use crate::profile_trace_file;
      use crate::render_trace_file;
  
      struct TestAtlas;
@@ -719,7 +721,7 @@ index c8a51168d5..5a7e47ff83 100644
      impl PlatformAtlas for TestAtlas {
          fn get_or_insert_with<'a>(
              &self,
-@@ -1044,6 +1472,52 @@ mod tests {
+@@ -1044,6 +1472,113 @@ mod tests {
          fs::remove_dir(root).expect("remove test directory");
      }
  
@@ -766,6 +768,67 @@ index c8a51168d5..5a7e47ff83 100644
 +        fs::remove_file(trace).expect("remove trace");
 +        fs::remove_file(invalid_trace).expect("remove invalid trace");
 +        fs::remove_file(output).expect("remove output");
++        fs::remove_dir(root).expect("remove test directory");
++    }
++
++    #[cfg(target_os = "macos")]
++    #[test]
++    fn profiles_v2_through_public_file_boundary() {
++        let root = unique_test_path("v2-profile");
++        fs::create_dir(&root).expect("create test directory");
++        let trace = root.join("trace.toml");
++        let output = root.join("profile.csv");
++        let invalid_trace = root.join("invalid-trace.toml");
++        let missing_trace = root.join("missing-trace.toml");
++        fs::write(&trace, valid_source()).expect("write trace");
++        fs::write(&invalid_trace, "schema = \"alpine-scene-trace/v1\"\n")
++            .expect("write invalid trace");
++
++        assert!(
++            profile_trace_file(&missing_trace, &output, 0, 1)
++                .expect_err("missing trace must fail")
++                .contains("cannot read trace")
++        );
++        assert!(
++            profile_trace_file(&invalid_trace, &output, 0, 1)
++                .expect_err("version 1 trace must fail")
++                .contains("requires alpine-scene-trace/v2")
++        );
++
++        #[cfg(feature = "runtime-shaders")]
++        assert!(
++            profile_trace_file(&trace, &output, 0, 1)
++                .expect_err("runtime shaders must not publish profile evidence")
++                .contains("requires pinned offline Metal shaders")
++        );
++
++        #[cfg(not(feature = "runtime-shaders"))]
++        {
++            let report = profile_trace_file(&trace, &output, 2, 2).expect("profile v2 trace");
++            assert_eq!(report.identity().schema(), "alpine-scene-trace/v2");
++            assert_eq!(report.adaptation().quad_count(), 1);
++            assert_eq!(report.adaptation().glyph_count(), 1);
++            assert_eq!(report.warmup_iterations(), 2);
++            assert_eq!(report.sample_count(), 2);
++            assert!(report.gpu_execution_sample_count() <= 2);
++            let csv = fs::read_to_string(&output).expect("read profile samples");
++            assert_eq!(
++                csv.lines().next(),
++                Some(
++                    "sample_index,resource_preparation_ns,instance_write_ns,command_buffer_ns,render_encoding_ns,readback_encoding_performed,readback_encoding_ns,commit_ns,completion_wait_ns,gpu_execution_available,gpu_execution_ns,readback_compaction_ns,total_ns"
++                )
++            );
++            assert_eq!(csv.lines().count(), 3);
++            assert!(
++                profile_trace_file(&trace, &output, 0, 1)
++                    .expect_err("profile collision must fail")
++                    .contains("output already exists")
++            );
++            fs::remove_file(&output).expect("remove profile output");
++        }
++
++        fs::remove_file(trace).expect("remove trace");
++        fs::remove_file(invalid_trace).expect("remove invalid trace");
 +        fs::remove_dir(root).expect("remove test directory");
 +    }
 +
