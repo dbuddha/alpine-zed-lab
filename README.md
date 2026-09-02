@@ -129,6 +129,23 @@ warmups, clock identity, and sample count. These samples are calibration input,
 not performance qualification or evidence of a product-level claim. Offline
 metallib mode is required; runtime-source shaders are rejected.
 
+For diagnosis, the adapter also exposes a separate observer-perturbed stage
+path:
+
+```sh
+alpine_trace_adapter --profile TRACE OUTPUT.csv WARMUPS SAMPLES
+```
+
+It records target and intermediate-resource preparation, instance writes,
+command-buffer acquisition, render encoding, discrete-memory readback encoding
+when required, commit, completion wait, Metal GPU execution when available,
+readback compaction, and total time. Optional stages carry explicit availability
+markers rather than fabricated zero durations. This path performs an independent
+semantic admission and checks every warmup and measured image against it. The
+ordinary `--benchmark` path contains no stage probes and is never corrected by
+subtracting profile stages. Profile output is explanatory E3 input only; it is
+not timing qualification or evidence that either renderer is faster.
+
 To reproduce the source-assurance gates locally, install the pinned
 `cargo-llvm-cov` and `cargo-mutants` versions shown in CI, then run:
 
