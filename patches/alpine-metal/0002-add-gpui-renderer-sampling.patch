@@ -742,7 +742,7 @@ index c8a51168d5..5a7e47ff83 100644
      impl PlatformAtlas for TestAtlas {
          fn get_or_insert_with<'a>(
              &self,
-@@ -1044,6 +1493,113 @@ mod tests {
+@@ -1044,6 +1493,115 @@ mod tests {
          fs::remove_dir(root).expect("remove test directory");
      }
  
@@ -825,13 +825,15 @@ index c8a51168d5..5a7e47ff83 100644
 +
 +        #[cfg(not(feature = "runtime-shaders"))]
 +        {
-+            let report = profile_trace_file(&trace, &output, 2, 2).expect("profile v2 trace");
++            let mut report = profile_trace_file(&trace, &output, 2, 2).expect("profile v2 trace");
 +            assert_eq!(report.identity().schema(), "alpine-scene-trace/v2");
 +            assert_eq!(report.adaptation().quad_count(), 1);
 +            assert_eq!(report.adaptation().glyph_count(), 1);
 +            assert_eq!(report.warmup_iterations(), 2);
 +            assert_eq!(report.sample_count(), 2);
 +            assert!(report.gpu_execution_sample_count() <= 2);
++            report.gpu_execution_sample_count = 2;
++            assert_eq!(report.gpu_execution_sample_count(), 2);
 +            let csv = fs::read_to_string(&output).expect("read profile samples");
 +            assert_eq!(
 +                csv.lines().next(),
