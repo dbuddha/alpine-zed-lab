@@ -275,7 +275,7 @@ index c8a51168d5..5a7e47ff83 100644
  
  #[derive(Debug, Deserialize)]
  #[serde(deny_unknown_fields)]
-@@ -114,6 +120,382 @@ pub(super) fn render_source(source: &str, output_path: &Path) -> Result<Rendered
+@@ -114,6 +120,403 @@ pub(super) fn render_source(source: &str, output_path: &Path) -> Result<Rendered
      })
  }
  
@@ -357,6 +357,35 @@ index c8a51168d5..5a7e47ff83 100644
 +    })
 +}
 +
++fn profile_renderer() -> Result<Box<dyn gpui::PlatformHeadlessRenderer>, String> {
++    gpui_platform::current_headless_renderer()
++        .ok_or("pinned GPUI headless Metal renderer is unavailable".to_owned())
++}
++
++fn profile_admission(
++    renderer: &mut dyn gpui::PlatformHeadlessRenderer,
++    scene: &Scene,
++    size: Size<DevicePixels>,
++    clear: Rgba,
++) -> Result<Vec<u8>, String> {
++    match renderer.render_scene_to_image_with_clear(scene, size, clear) {
++        Ok(image) => Ok(image.into_raw()),
++        Err(error) => Err(format!("pinned GPUI Metal readback failed: {error:#}")),
++    }
++}
++
++fn profile_readback(
++    renderer: &mut dyn gpui::PlatformHeadlessRenderer,
++    scene: &Scene,
++    size: Size<DevicePixels>,
++    clear: Rgba,
++) -> Result<(Vec<u8>, HeadlessRenderProfile), String> {
++    match renderer.render_scene_to_image_profiled(scene, size, clear) {
++        Ok((image, profile)) => Ok((image.into_raw(), profile)),
++        Err(error) => Err(format!("pinned GPUI Metal profile failed: {error:#}")),
++    }
++}
++
 +pub(super) fn profile_source(
 +    source: &str,
 +    output_path: &Path,
@@ -370,20 +399,14 @@ index c8a51168d5..5a7e47ff83 100644
 +    ensure_new_sample_output(output_path, "profile")?;
 +
 +    let prepared = decode(source)?;
-+    let mut renderer = gpui_platform::current_headless_renderer()
-+        .ok_or_else(|| "pinned GPUI headless Metal renderer is unavailable".to_owned())?;
++    let mut renderer = profile_renderer()?;
 +    let (scene, adaptation) = prepared.build_scene(renderer.sprite_atlas().as_ref())?;
 +    let clear = prepared.clear_color();
-+    let admitted = renderer
-+        .render_scene_to_image_with_clear(&scene, prepared.size(), clear)
-+        .map_err(|error| format!("pinned GPUI Metal readback failed: {error:#}"))?
-+        .into_raw();
++    let admitted = profile_admission(renderer.as_mut(), &scene, prepared.size(), clear)?;
 +
 +    for _ in 0..warmup_iterations {
-+        let (image, _) = renderer
-+            .render_scene_to_image_profiled(&scene, prepared.size(), clear)
-+            .map_err(|error| format!("pinned GPUI Metal profile failed: {error:#}"))?;
-+        if image.into_raw() != admitted {
++        let (image, _) = profile_readback(renderer.as_mut(), &scene, prepared.size(), clear)?;
++        if image != admitted {
 +            return Err("GPUI renderer profile image changed during warmup".to_owned());
 +        }
 +    }
@@ -392,10 +415,8 @@ index c8a51168d5..5a7e47ff83 100644
 +        .map_err(|_| "GPUI renderer profile sample count exceeds usize".to_owned())?;
 +    let mut samples = Vec::with_capacity(capacity);
 +    for _ in 0..sample_count {
-+        let (image, profile) = renderer
-+            .render_scene_to_image_profiled(&scene, prepared.size(), clear)
-+            .map_err(|error| format!("pinned GPUI Metal profile failed: {error:#}"))?;
-+        if image.into_raw() != admitted {
++        let (image, profile) = profile_readback(renderer.as_mut(), &scene, prepared.size(), clear)?;
++        if image != admitted {
 +            return Err("GPUI renderer profile image changed during measurement".to_owned());
 +        }
 +        samples.push(profile);
@@ -658,7 +679,7 @@ index c8a51168d5..5a7e47ff83 100644
  pub(crate) struct PreparedTrace {
      trace: Trace,
      size: Size<DevicePixels>,
-@@ -759,13 +1141,61 @@ mod tests {
+@@ -759,13 +1162,61 @@ mod tests {
          Point, Size, TileId,
      };
  
@@ -721,7 +742,7 @@ index c8a51168d5..5a7e47ff83 100644
      impl PlatformAtlas for TestAtlas {
          fn get_or_insert_with<'a>(
              &self,
-@@ -1044,6 +1472,113 @@ mod tests {
+@@ -1044,6 +1493,113 @@ mod tests {
          fs::remove_dir(root).expect("remove test directory");
      }
  
