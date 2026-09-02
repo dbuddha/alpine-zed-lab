@@ -1,8 +1,8 @@
 diff --git a/crates/alpine_trace_adapter/src/lib.rs b/crates/alpine_trace_adapter/src/lib.rs
-index 633f3606dd..36f7d6e82a 100644
+index 633f3606dd..3b10636d17 100644
 --- a/crates/alpine_trace_adapter/src/lib.rs
 +++ b/crates/alpine_trace_adapter/src/lib.rs
-@@ -196,6 +196,34 @@ pub struct RenderedTrace {
+@@ -196,6 +196,67 @@ pub struct RenderedTrace {
      adaptation: AdaptationReport,
  }
  
@@ -13,6 +13,39 @@ index 633f3606dd..36f7d6e82a 100644
 +    adaptation: AdaptationReport,
 +    warmup_iterations: u64,
 +    sample_count: u64,
++}
++
++/// Result of one bounded, observer-perturbed GPUI Metal attribution window.
++#[derive(Debug)]
++pub struct ProfileReport {
++    identity: TraceIdentity,
++    adaptation: AdaptationReport,
++    warmup_iterations: u64,
++    sample_count: u64,
++    gpu_execution_sample_count: u64,
++}
++
++impl ProfileReport {
++    /// Returns the trace identity.
++    pub const fn identity(&self) -> &TraceIdentity {
++        &self.identity
++    }
++    /// Returns adaptation evidence collected before measurement.
++    pub const fn adaptation(&self) -> AdaptationReport {
++        self.adaptation
++    }
++    /// Returns the additional discarded warmup renders.
++    pub const fn warmup_iterations(&self) -> u64 {
++        self.warmup_iterations
++    }
++    /// Returns the measured profile sample count.
++    pub const fn sample_count(&self) -> u64 {
++        self.sample_count
++    }
++    /// Returns samples containing a valid Metal GPU interval.
++    pub const fn gpu_execution_sample_count(&self) -> u64 {
++        self.gpu_execution_sample_count
++    }
 +}
 +
 +impl BenchmarkReport {
@@ -37,7 +70,7 @@ index 633f3606dd..36f7d6e82a 100644
  impl RenderedTrace {
      /// Returns the trace identity.
      pub const fn identity(&self) -> &TraceIdentity {
-@@ -346,6 +379,31 @@ pub fn render_trace_file(trace_path: &Path, output_path: &Path) -> Result<Render
+@@ -346,6 +407,49 @@ pub fn render_trace_file(trace_path: &Path, output_path: &Path) -> Result<Render
      })
  }
  
@@ -66,28 +99,91 @@ index 633f3606dd..36f7d6e82a 100644
 +    v2::benchmark_source(&source, output_path, warmup_iterations, sample_count)
 +}
 +
++/// Captures separate, observer-perturbed GPUI Metal stages for one version 2 trace.
++pub fn profile_trace_file(
++    trace_path: &Path,
++    output_path: &Path,
++    warmup_iterations: u64,
++    sample_count: u64,
++) -> Result<ProfileReport, String> {
++    let source = fs::read_to_string(trace_path)
++        .map_err(|error| format!("cannot read trace {}: {error}", trace_path.display()))?;
++    if !source
++        .lines()
++        .any(|line| line == "schema = \"alpine-scene-trace/v2\"")
++    {
++        return Err("GPUI renderer profiling requires alpine-scene-trace/v2".to_owned());
++    }
++    v2::profile_source(&source, output_path, warmup_iterations, sample_count)
++}
++
  pub(crate) fn write_readback(
      mut bytes: Vec<u8>,
      identity: &TraceIdentity,
 diff --git a/crates/alpine_trace_adapter/src/main.rs b/crates/alpine_trace_adapter/src/main.rs
-index cdae1484c8..b3eaf4bd93 100644
+index cdae1484c8..a9eabb78ec 100644
 --- a/crates/alpine_trace_adapter/src/main.rs
 +++ b/crates/alpine_trace_adapter/src/main.rs
-@@ -1,6 +1,6 @@
+@@ -1,6 +1,8 @@
  use std::{env, path::Path, process::ExitCode};
  
 -use alpine_trace_adapter::{render_sequence_file, render_trace_file};
-+use alpine_trace_adapter::{benchmark_trace_file, render_sequence_file, render_trace_file};
++use alpine_trace_adapter::{
++    benchmark_trace_file, profile_trace_file, render_sequence_file, render_trace_file,
++};
  
  fn main() -> ExitCode {
      match run() {
-@@ -18,8 +18,57 @@ fn main() -> ExitCode {
+@@ -18,8 +20,100 @@ fn main() -> ExitCode {
  fn run() -> Result<String, String> {
      let mut arguments = env::args().skip(1);
      let first = arguments.next().ok_or_else(|| {
 -        "expected TRACE OUTPUT or --sequence MANIFEST ROOT OUTPUT arguments".to_owned()
-+        "expected TRACE OUTPUT, --benchmark TRACE OUTPUT WARMUPS SAMPLES, or --sequence MANIFEST ROOT OUTPUT arguments".to_owned()
++        "expected TRACE OUTPUT, --benchmark TRACE OUTPUT WARMUPS SAMPLES, --profile TRACE OUTPUT WARMUPS SAMPLES, or --sequence MANIFEST ROOT OUTPUT arguments".to_owned()
      })?;
++    if first == "--profile" {
++        let expected = "expected --profile TRACE OUTPUT WARMUPS SAMPLES arguments";
++        let trace = arguments.next().ok_or_else(|| expected.to_owned())?;
++        let output = arguments.next().ok_or_else(|| expected.to_owned())?;
++        let warmups = arguments
++            .next()
++            .ok_or_else(|| expected.to_owned())?
++            .parse::<u64>()
++            .map_err(|_| "profile warmup count must be an unsigned integer".to_owned())?;
++        let samples = arguments
++            .next()
++            .ok_or_else(|| expected.to_owned())?
++            .parse::<u64>()
++            .map_err(|_| "profile sample count must be an unsigned integer".to_owned())?;
++        if arguments.next().is_some() {
++            return Err(
++                "expected exactly --profile TRACE OUTPUT WARMUPS SAMPLES arguments".to_owned(),
++            );
++        }
++        let report = profile_trace_file(Path::new(&trace), Path::new(&output), warmups, samples)?;
++        let identity = report.identity();
++        let adaptation = report.adaptation();
++        return Ok(format!(
++            "schema=alpine-zed-gpui-renderer-profile/v1 trace_schema={} id={} workload_hash={} revision={} width={} height={} adaptation_clips={} adaptation_operations={} adaptation_quads={} adaptation_glyphs={} adaptation_resources={} adaptation_resource_bytes={} adaptation_atlas_allocations={} adaptation_timing_performed=false admission_iterations=1 warmup_iterations={} sample_count={} gpu_execution_sample_count={} measurement_stage=renderer-stage-attribution clock=process-monotonic-instant observer_perturbed=true ordinary_samples_unchanged=true performance_qualified=false output={}",
++            identity.schema(),
++            identity.id(),
++            identity.workload_hash(),
++            identity.revision(),
++            identity.pixel_width(),
++            identity.pixel_height(),
++            adaptation.clip_count(),
++            adaptation.operation_count(),
++            adaptation.quad_count(),
++            adaptation.glyph_count(),
++            adaptation.resource_count(),
++            adaptation.resource_bytes(),
++            adaptation.atlas_allocations(),
++            report.warmup_iterations(),
++            report.sample_count(),
++            report.gpu_execution_sample_count(),
++            output,
++        ));
++    }
 +    if first == "--benchmark" {
 +        let trace = arguments.next().ok_or_else(|| {
 +            "expected --benchmark TRACE OUTPUT WARMUPS SAMPLES arguments".to_owned()
@@ -141,10 +237,10 @@ index cdae1484c8..b3eaf4bd93 100644
          let manifest = arguments
              .next()
 diff --git a/crates/alpine_trace_adapter/src/v2.rs b/crates/alpine_trace_adapter/src/v2.rs
-index c8a51168d5..1a38cf681e 100644
+index c8a51168d5..5a7e47ff83 100644
 --- a/crates/alpine_trace_adapter/src/v2.rs
 +++ b/crates/alpine_trace_adapter/src/v2.rs
-@@ -1,6 +1,9 @@
+@@ -1,24 +1,30 @@
  use std::{
      borrow::Cow,
      collections::{BTreeMap, BTreeSet},
@@ -154,13 +250,19 @@ index c8a51168d5..1a38cf681e 100644
      path::Path,
  };
  
-@@ -11,14 +14,16 @@ use gpui::{
+ use gpui::{
+-    AtlasKey, AtlasTile, ContentMask, DevicePixels, MonochromeSprite, PlatformAtlas, Quad,
+-    RenderSvgParams, Rgba, ScaledPixels, Scene, Size, TransformationMatrix, bounds, point, size,
++    AtlasKey, AtlasTile, ContentMask, DevicePixels, HeadlessRenderProfile, MonochromeSprite,
++    PlatformAtlas, Quad, RenderSvgParams, Rgba, ScaledPixels, Scene, Size, TransformationMatrix,
++    bounds, point, size,
+ };
  use serde::Deserialize;
  
  use super::{
 -    AdaptationReport, PairIdentity, RenderedTrace, TraceIdentity, valid_device_dimension,
 -    valid_sha256, valid_slug, write_readback,
-+    AdaptationReport, BenchmarkReport, PairIdentity, RenderedTrace, TraceIdentity,
++    AdaptationReport, BenchmarkReport, PairIdentity, ProfileReport, RenderedTrace, TraceIdentity,
 +    valid_device_dimension, valid_sha256, valid_slug, write_readback,
  };
  
@@ -173,7 +275,7 @@ index c8a51168d5..1a38cf681e 100644
  
  #[derive(Debug, Deserialize)]
  #[serde(deny_unknown_fields)]
-@@ -114,6 +119,237 @@ pub(super) fn render_source(source: &str, output_path: &Path) -> Result<Rendered
+@@ -114,6 +120,382 @@ pub(super) fn render_source(source: &str, output_path: &Path) -> Result<Rendered
      })
  }
  
@@ -252,6 +354,151 @@ index c8a51168d5..1a38cf681e 100644
 +        adaptation,
 +        warmup_iterations,
 +        sample_count,
++    })
++}
++
++pub(super) fn profile_source(
++    source: &str,
++    output_path: &Path,
++    warmup_iterations: u64,
++    sample_count: u64,
++) -> Result<ProfileReport, String> {
++    if cfg!(feature = "runtime-shaders") {
++        return Err("GPUI renderer profiling requires pinned offline Metal shaders".to_owned());
++    }
++    validate_benchmark_counts(warmup_iterations, sample_count)?;
++    ensure_new_sample_output(output_path, "profile")?;
++
++    let prepared = decode(source)?;
++    let mut renderer = gpui_platform::current_headless_renderer()
++        .ok_or_else(|| "pinned GPUI headless Metal renderer is unavailable".to_owned())?;
++    let (scene, adaptation) = prepared.build_scene(renderer.sprite_atlas().as_ref())?;
++    let clear = prepared.clear_color();
++    let admitted = renderer
++        .render_scene_to_image_with_clear(&scene, prepared.size(), clear)
++        .map_err(|error| format!("pinned GPUI Metal readback failed: {error:#}"))?
++        .into_raw();
++
++    for _ in 0..warmup_iterations {
++        let (image, _) = renderer
++            .render_scene_to_image_profiled(&scene, prepared.size(), clear)
++            .map_err(|error| format!("pinned GPUI Metal profile failed: {error:#}"))?;
++        if image.into_raw() != admitted {
++            return Err("GPUI renderer profile image changed during warmup".to_owned());
++        }
++    }
++
++    let capacity = usize::try_from(sample_count)
++        .map_err(|_| "GPUI renderer profile sample count exceeds usize".to_owned())?;
++    let mut samples = Vec::with_capacity(capacity);
++    for _ in 0..sample_count {
++        let (image, profile) = renderer
++            .render_scene_to_image_profiled(&scene, prepared.size(), clear)
++            .map_err(|error| format!("pinned GPUI Metal profile failed: {error:#}"))?;
++        if image.into_raw() != admitted {
++            return Err("GPUI renderer profile image changed during measurement".to_owned());
++        }
++        samples.push(profile);
++    }
++
++    let gpu_execution_sample_count = samples
++        .iter()
++        .filter(|sample| sample.gpu_execution_ns.is_some())
++        .count() as u64;
++    let csv = render_profile_samples(&samples)?;
++    publish_sample_output(output_path, csv.as_bytes(), "profile")?;
++    Ok(ProfileReport {
++        identity: prepared.identity,
++        adaptation,
++        warmup_iterations,
++        sample_count,
++        gpu_execution_sample_count,
++    })
++}
++
++fn ensure_new_sample_output(output_path: &Path, kind: &str) -> Result<(), String> {
++    match fs::symlink_metadata(output_path) {
++        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
++        Ok(_) => Err(format!(
++            "GPUI renderer {kind} output already exists: {}",
++            output_path.display()
++        )),
++        Err(error) => Err(format!(
++            "cannot inspect GPUI renderer {kind} output {}: {error}",
++            output_path.display()
++        )),
++    }
++}
++
++fn render_profile_samples(samples: &[HeadlessRenderProfile]) -> Result<String, String> {
++    let mut csv = String::with_capacity(samples.len().saturating_mul(192).saturating_add(256));
++    csv.push_str("sample_index,resource_preparation_ns,instance_write_ns,command_buffer_ns,render_encoding_ns,readback_encoding_performed,readback_encoding_ns,commit_ns,completion_wait_ns,gpu_execution_available,gpu_execution_ns,readback_compaction_ns,total_ns\n");
++    for (index, sample) in samples.iter().enumerate() {
++        let readback_encoding = sample
++            .readback_encoding_ns
++            .map(|value| value.to_string())
++            .unwrap_or_default();
++        let gpu_execution = sample
++            .gpu_execution_ns
++            .map(|value| value.to_string())
++            .unwrap_or_default();
++        writeln!(
++            &mut csv,
++            "{index},{},{},{},{},{},{},{},{},{},{},{},{}",
++            sample.resource_preparation_ns,
++            sample.instance_write_ns,
++            sample.command_buffer_ns,
++            sample.render_encoding_ns,
++            sample.readback_encoding_ns.is_some(),
++            readback_encoding,
++            sample.commit_ns,
++            sample.completion_wait_ns,
++            sample.gpu_execution_ns.is_some(),
++            gpu_execution,
++            sample.readback_compaction_ns,
++            sample.total_ns,
++        )
++        .map_err(|error| format!("cannot format GPUI renderer profile sample: {error}"))?;
++    }
++    Ok(csv)
++}
++
++fn publish_sample_output(output: &Path, bytes: &[u8], kind: &str) -> Result<(), String> {
++    let temporary = output.with_file_name(format!(
++        ".alpine-gpui-renderer-{kind}-{}.tmp",
++        std::process::id()
++    ));
++    let mut file = OpenOptions::new()
++        .write(true)
++        .create_new(true)
++        .open(&temporary)
++        .map_err(|error| {
++            format!(
++                "cannot create GPUI renderer {kind} temporary output {}: {error}",
++                temporary.display()
++            )
++        })?;
++    let write_result = file.write_all(bytes).and_then(|()| file.sync_all());
++    drop(file);
++    if let Err(error) = write_result {
++        let _ = fs::remove_file(&temporary);
++        return Err(format!(
++            "cannot persist GPUI renderer {kind} temporary output {}: {error}",
++            temporary.display()
++        ));
++    }
++    if let Err(error) = fs::hard_link(&temporary, output) {
++        let _ = fs::remove_file(&temporary);
++        return Err(format!(
++            "cannot publish GPUI renderer {kind} output {} without replacement: {error}",
++            output.display()
++        ));
++    }
++    fs::remove_file(&temporary).map_err(|error| {
++        format!(
++            "cannot remove GPUI renderer {kind} temporary output {}: {error}",
++            temporary.display()
++        )
 +    })
 +}
 +
@@ -411,16 +658,68 @@ index c8a51168d5..1a38cf681e 100644
  pub(crate) struct PreparedTrace {
      trace: Trace,
      size: Size<DevicePixels>,
-@@ -760,6 +997,8 @@ mod tests {
+@@ -759,13 +1141,59 @@ mod tests {
+         Point, Size, TileId,
      };
  
-     use super::{canonical_workload_hash, decode, sha256_hex};
+-    use super::{canonical_workload_hash, decode, sha256_hex};
++    use super::{canonical_workload_hash, decode, render_profile_samples, sha256_hex};
 +    #[cfg(all(target_os = "macos", not(feature = "runtime-shaders")))]
 +    use crate::benchmark_trace_file;
      use crate::render_trace_file;
  
      struct TestAtlas;
-@@ -1044,6 +1282,52 @@ mod tests {
+ 
+     struct RejectingAtlas;
+ 
++    #[test]
++    fn profile_csv_preserves_optional_stage_omissions() {
++        let csv = render_profile_samples(&[
++            gpui::HeadlessRenderProfile {
++                resource_preparation_ns: 1,
++                instance_write_ns: 2,
++                command_buffer_ns: 3,
++                render_encoding_ns: 4,
++                readback_encoding_ns: None,
++                commit_ns: 5,
++                completion_wait_ns: 6,
++                gpu_execution_ns: None,
++                readback_compaction_ns: 7,
++                total_ns: 28,
++            },
++            gpui::HeadlessRenderProfile {
++                resource_preparation_ns: 8,
++                instance_write_ns: 9,
++                command_buffer_ns: 10,
++                render_encoding_ns: 11,
++                readback_encoding_ns: Some(12),
++                commit_ns: 13,
++                completion_wait_ns: 14,
++                gpu_execution_ns: Some(15),
++                readback_compaction_ns: 16,
++                total_ns: 108,
++            },
++        ])
++        .unwrap();
++        let mut lines = csv.lines();
++        assert_eq!(
++            lines.next(),
++            Some(
++                "sample_index,resource_preparation_ns,instance_write_ns,command_buffer_ns,render_encoding_ns,readback_encoding_performed,readback_encoding_ns,commit_ns,completion_wait_ns,gpu_execution_available,gpu_execution_ns,readback_compaction_ns,total_ns"
++            )
++        );
++        assert_eq!(lines.next(), Some("0,1,2,3,4,false,,5,6,false,,7,28"));
++        assert_eq!(
++            lines.next(),
++            Some("1,8,9,10,11,true,12,13,14,true,15,16,108")
++        );
++        assert_eq!(lines.next(), None);
++    }
++
+     impl PlatformAtlas for TestAtlas {
+         fn get_or_insert_with<'a>(
+             &self,
+@@ -1044,6 +1472,52 @@ mod tests {
          fs::remove_dir(root).expect("remove test directory");
      }
  
@@ -473,3 +772,321 @@ index c8a51168d5..1a38cf681e 100644
      fn valid_source() -> String {
          let content_hash = sha256_hex(&[255, 0, 255, 0]);
          rebind(format!(
+diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+index 694bb0ac33..9f90f61b67 100644
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -969,6 +969,32 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     }
+ }
+ 
++/// Observer-perturbed stage attribution for one headless renderer call.
++#[cfg(any(test, feature = "test-support"))]
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct HeadlessRenderProfile {
++    /// Target, texture, and intermediate-resource preparation time.
++    pub resource_preparation_ns: u64,
++    /// Instance-buffer acquisition and scene instance write time.
++    pub instance_write_ns: u64,
++    /// Command-buffer acquisition time.
++    pub command_buffer_ns: u64,
++    /// Render-command encoding and completion-handler registration time.
++    pub render_encoding_ns: u64,
++    /// Discrete-memory readback synchronization encoding time, when required.
++    pub readback_encoding_ns: Option<u64>,
++    /// Command-buffer commit call time.
++    pub commit_ns: u64,
++    /// Synchronous command-buffer completion wait time.
++    pub completion_wait_ns: u64,
++    /// Metal-reported GPU execution interval, when available and valid.
++    pub gpu_execution_ns: Option<u64>,
++    /// Texture readback, channel conversion, and image construction time.
++    pub readback_compaction_ns: u64,
++    /// Complete profiled renderer call time.
++    pub total_ns: u64,
++}
++
+ /// A renderer for headless windows that can produce real rendered output.
+ #[cfg(any(test, feature = "test-support"))]
+ pub trait PlatformHeadlessRenderer {
+@@ -992,6 +1018,19 @@ pub trait PlatformHeadlessRenderer {
+         anyhow::bail!("explicit headless clear color is not supported by this renderer")
+     }
+ 
++    /// Render with explicit diagnostic stage probes.
++    ///
++    /// Implementations must keep this separate from ordinary renderer samples
++    /// because observing stages perturbs their distribution.
++    fn render_scene_to_image_profiled(
++        &mut self,
++        _scene: &Scene,
++        _size: Size<DevicePixels>,
++        _clear_color: crate::Rgba,
++    ) -> Result<(RgbaImage, HeadlessRenderProfile)> {
++        anyhow::bail!("headless renderer stage profiling is not supported")
++    }
++
+     /// Render a scene to an offscreen target without reading the result back.
+     ///
+     /// This is the headless analogue of presenting a frame: it performs the
+diff --git a/crates/gpui_macos/src/metal_renderer.rs b/crates/gpui_macos/src/metal_renderer.rs
+index ccc5a95441..9c08e66be7 100644
+--- a/crates/gpui_macos/src/metal_renderer.rs
++++ b/crates/gpui_macos/src/metal_renderer.rs
+@@ -7,8 +7,8 @@ use cocoa::{
+     quartzcore::AutoresizingMask,
+ };
+ use gpui::{
+-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
+-    PrimitiveBatch, Rgba, ScaledPixels, Scene, Size, point, size,
++    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, HeadlessRenderProfile,
++    PaintSurface, Path, Point, PrimitiveBatch, Rgba, ScaledPixels, Scene, Size, point, size,
+ };
+ #[cfg(any(test, feature = "test-support"))]
+ use image::RgbaImage;
+@@ -548,6 +548,67 @@ impl MetalRenderer {
+         Ok(command_buffer)
+     }
+ 
++    #[cfg(any(test, feature = "test-support"))]
++    fn render_frame_profiled(
++        &mut self,
++        scene: &Scene,
++        texture: &metal::TextureRef,
++        viewport_size: Size<DevicePixels>,
++        clear_color: metal::MTLClearColor,
++    ) -> Result<(metal::CommandBuffer, u64, u64, u64)> {
++        let instance_started = std::time::Instant::now();
++        let mut writer = InstanceBufferWriter::new(
++            &self.device,
++            &self.instance_buffer_pool,
++            self.is_unified_memory,
++        );
++        let instance_bindings = write_instances(scene, &mut writer).with_context(|| {
++            format!(
++                "scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces",
++                scene.paths.len(),
++                scene.shadows.len(),
++                scene.quads.len(),
++                scene.underlines.len(),
++                scene.monochrome_sprites.len(),
++                scene.polychrome_sprites.len(),
++                scene.surfaces.len(),
++            )
++        })?;
++        let instance_write_ns = profiled_elapsed_ns(instance_started, "instance write")?;
++
++        let command_started = std::time::Instant::now();
++        let command_buffer = self.command_queue.new_command_buffer().to_owned();
++        let command_buffer_ns = profiled_elapsed_ns(command_started, "command buffer")?;
++
++        let render_started = std::time::Instant::now();
++        self.encode_primitives_to_texture(
++            scene,
++            &instance_bindings,
++            &mut writer,
++            texture,
++            viewport_size,
++            clear_color,
++            &command_buffer,
++        )?;
++        let instance_buffer_pool = self.instance_buffer_pool.clone();
++        let instance_buffer = Cell::new(Some(writer.finish()));
++        let block = ConcreteBlock::new(move |_| {
++            if let Some(instance_buffer) = instance_buffer.take() {
++                instance_buffer_pool.lock().release(instance_buffer);
++            }
++        });
++        let block = block.copy();
++        command_buffer.add_completed_handler(&block);
++        let render_encoding_ns = profiled_elapsed_ns(render_started, "render encoding")?;
++
++        Ok((
++            command_buffer,
++            instance_write_ns,
++            command_buffer_ns,
++            render_encoding_ns,
++        ))
++    }
++
+     /// Renders the scene to a texture and returns the pixel data as an RGBA image.
+     /// This does not present the frame to screen - useful for visual testing
+     /// where we want to capture what would be rendered without displaying it.
+@@ -653,6 +714,91 @@ impl MetalRenderer {
+         read_texture_to_image(&target_texture)
+     }
+ 
++    /// Renders one headless frame through a separate, observer-perturbed stage
++    /// attribution path. Ordinary readback and benchmark methods contain no
++    /// stage probes.
++    #[cfg(any(test, feature = "test-support"))]
++    pub fn render_scene_to_image_profiled(
++        &mut self,
++        scene: &Scene,
++        size: Size<DevicePixels>,
++        clear_color: Rgba,
++    ) -> Result<(RgbaImage, HeadlessRenderProfile)> {
++        if size.width.0 <= 0 || size.height.0 <= 0 {
++            anyhow::bail!(
++                "Invalid size for render_scene_to_image_profiled: {:?}",
++                size
++            );
++        }
++
++        let total_started = std::time::Instant::now();
++        let resource_started = std::time::Instant::now();
++        self.update_path_intermediate_textures(size);
++        let texture_descriptor = metal::TextureDescriptor::new();
++        texture_descriptor.set_width(size.width.0 as u64);
++        texture_descriptor.set_height(size.height.0 as u64);
++        texture_descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
++        texture_descriptor
++            .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
++        texture_descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
++        let target_texture = self.device.new_texture(&texture_descriptor);
++        let resource_preparation_ns =
++            profiled_elapsed_ns(resource_started, "resource preparation")?;
++
++        let (command_buffer, instance_write_ns, command_buffer_ns, render_encoding_ns) = self
++            .render_frame_profiled(
++                scene,
++                &target_texture,
++                size,
++                metal::MTLClearColor::new(
++                    clear_color.r.into(),
++                    clear_color.g.into(),
++                    clear_color.b.into(),
++                    clear_color.a.into(),
++                ),
++            )?;
++
++        let readback_encoding_ns = if self.is_unified_memory {
++            None
++        } else {
++            let started = std::time::Instant::now();
++            let blit = command_buffer.new_blit_command_encoder();
++            blit.synchronize_resource(&target_texture);
++            blit.end_encoding();
++            Some(profiled_elapsed_ns(started, "readback encoding")?)
++        };
++
++        let commit_started = std::time::Instant::now();
++        command_buffer.commit();
++        let commit_ns = profiled_elapsed_ns(commit_started, "commit")?;
++
++        let completion_started = std::time::Instant::now();
++        command_buffer.wait_until_completed();
++        let completion_wait_ns = profiled_elapsed_ns(completion_started, "completion wait")?;
++        let gpu_execution_ns = profiled_gpu_execution_ns(&command_buffer);
++
++        let readback_started = std::time::Instant::now();
++        let image = read_texture_to_image(&target_texture)?;
++        let readback_compaction_ns = profiled_elapsed_ns(readback_started, "readback compaction")?;
++        let total_ns = profiled_elapsed_ns(total_started, "profile total")?;
++
++        Ok((
++            image,
++            HeadlessRenderProfile {
++                resource_preparation_ns,
++                instance_write_ns,
++                command_buffer_ns,
++                render_encoding_ns,
++                readback_encoding_ns,
++                commit_ns,
++                completion_wait_ns,
++                gpu_execution_ns,
++                readback_compaction_ns,
++                total_ns,
++            },
++        ))
++    }
++
+     /// Renders a scene to a reused offscreen texture without reading pixels
+     /// back or blocking on GPU completion.
+     ///
+@@ -706,6 +852,28 @@ impl MetalRenderer {
+     ) -> Result<metal::CommandBuffer> {
+         let command_queue = self.command_queue.clone();
+         let command_buffer = command_queue.new_command_buffer();
++        self.encode_primitives_to_texture(
++            scene,
++            instance_bindings,
++            writer,
++            texture,
++            viewport_size,
++            clear_color,
++            command_buffer,
++        )?;
++        Ok(command_buffer.to_owned())
++    }
++
++    fn encode_primitives_to_texture(
++        &mut self,
++        scene: &Scene,
++        instance_bindings: &InstanceBindings,
++        writer: &mut InstanceBufferWriter,
++        texture: &metal::TextureRef,
++        viewport_size: Size<DevicePixels>,
++        clear_color: metal::MTLClearColor,
++        command_buffer: &metal::CommandBufferRef,
++    ) -> Result<()> {
+         let mut command_encoder = new_command_encoder_for_texture(
+             command_buffer,
+             texture,
+@@ -783,7 +951,7 @@ impl MetalRenderer {
+ 
+         command_encoder.end_encoding();
+ 
+-        Ok(command_buffer.to_owned())
++        Ok(())
+     }
+ 
+     fn draw_paths_to_intermediate(
+@@ -1312,6 +1480,30 @@ fn read_texture_to_image(texture: &metal::TextureRef) -> Result<RgbaImage> {
+     RgbaImage::from_raw(width, height, pixels).context("failed to create RgbaImage from pixel data")
+ }
+ 
++#[cfg(any(test, feature = "test-support"))]
++fn profiled_elapsed_ns(started: std::time::Instant, stage: &str) -> Result<u64> {
++    u64::try_from(started.elapsed().as_nanos())
++        .with_context(|| format!("{stage} duration exceeded u64 nanoseconds"))
++}
++
++#[cfg(any(test, feature = "test-support"))]
++fn profiled_gpu_execution_ns(command_buffer: &metal::CommandBufferRef) -> Option<u64> {
++    let started: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
++    let completed: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
++    let elapsed = (completed - started) * 1_000_000_000.0;
++    if started.is_finite()
++        && completed.is_finite()
++        && completed > started
++        && elapsed.is_finite()
++        && elapsed > 0.0
++        && elapsed <= u64::MAX as f64
++    {
++        Some(elapsed.round() as u64)
++    } else {
++        None
++    }
++}
++
+ fn build_pipeline_state(
+     device: &metal::DeviceRef,
+     library: &metal::LibraryRef,
+@@ -1672,6 +1864,16 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
+             .render_scene_to_image_with_clear(scene, size, clear_color)
+     }
+ 
++    fn render_scene_to_image_profiled(
++        &mut self,
++        scene: &Scene,
++        size: Size<DevicePixels>,
++        clear_color: gpui::Rgba,
++    ) -> anyhow::Result<(image::RgbaImage, gpui::HeadlessRenderProfile)> {
++        self.renderer
++            .render_scene_to_image_profiled(scene, size, clear_color)
++    }
++
+     fn render_scene(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
+         self.renderer.render_scene(scene, size)
+     }
