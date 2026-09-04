@@ -285,6 +285,22 @@ def parse_utc(value: Any, label: str) -> dt.datetime:
         raise ProtocolError(f"{label} is not a valid UTC timestamp") from error
 
 
+def validate_independent_windows(windows: Iterable[dict[str, Any]]) -> None:
+    intervals = sorted(
+        (
+            parse_utc(window["started_at_utc"], f"window {window['id']} start"),
+            parse_utc(window["ended_at_utc"], f"window {window['id']} end"),
+            window["id"],
+        )
+        for window in windows
+    )
+    for previous, current in zip(intervals, intervals[1:]):
+        require(
+            previous[1] <= current[0],
+            f"hardware windows overlap: {previous[2]} and {current[2]}",
+        )
+
+
 def canonical_window_hash(window: dict[str, Any]) -> str:
     encoded = json.dumps(
         {field: window[field] for field in WINDOW_FIELDS},
@@ -1469,6 +1485,7 @@ def compose(arguments: argparse.Namespace) -> None:
         len(windows) >= MINIMUM_WINDOWS,
         f"composition requires at least {MINIMUM_WINDOWS} independent windows",
     )
+    validate_independent_windows(windows.values())
     assert identity is not None and warmups is not None
     assert adaptation_hash is not None
 
