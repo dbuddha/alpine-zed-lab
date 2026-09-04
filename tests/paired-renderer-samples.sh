@@ -262,6 +262,71 @@ if scripts/run-paired-renderer-samples.sh compose \
 fi
 test ! -e "$artifact_root/identity-output"
 
+cp -R "$artifact_root/runs/run-20" "$artifact_root/overlap-drift"
+python3 - "$artifact_root/overlap-drift/run.toml" <<'PY'
+import importlib.util
+import re
+import sys
+from pathlib import Path
+
+module_path = Path("scripts/paired_renderer_samples.py").resolve()
+spec = importlib.util.spec_from_file_location("paired_renderer_samples", module_path)
+assert spec is not None and spec.loader is not None
+paired = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(paired)
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+source = source.replace('id = "window-04"', 'id = "window-overlap"', 1)
+source = source.replace(
+    'lease_id = "fixture-lease-04"',
+    'lease_id = "fixture-lease-overlap"',
+    1,
+)
+source = source.replace(
+    'started_at_utc = "2026-08-04T10:00:00Z"',
+    'started_at_utc = "2026-08-03T10:30:00Z"',
+    1,
+)
+source = source.replace(
+    'ended_at_utc = "2026-08-04T11:00:00Z"',
+    'ended_at_utc = "2026-08-03T11:30:00Z"',
+    1,
+)
+path.write_text(source, encoding="utf-8")
+record = paired.load_toml(path)
+environment_hash = paired.canonical_window_hash(record["window"])
+source = path.read_text(encoding="utf-8")
+source = re.sub(
+    r'^environment_hash = "[0-9a-f]{64}"$',
+    f'environment_hash = "{environment_hash}"',
+    source,
+    count=1,
+    flags=re.MULTILINE,
+)
+path.write_text(source, encoding="utf-8")
+PY
+overlap_runs=
+index=1
+while [ "$index" -le 19 ]; do
+    run=$(printf 'run-%02d' "$index")
+    overlap_runs="$overlap_runs --run $artifact_root/runs/$run"
+    index=$((index + 1))
+done
+overlap_runs="$overlap_runs --run $artifact_root/overlap-drift"
+set -- $overlap_runs
+if scripts/run-paired-renderer-samples.sh compose \
+    --output "$artifact_root/overlap-output" \
+    "$@" \
+    --alpine-assurance "$ALPINE_ASSURANCE_BIN" \
+    >"$artifact_root/overlap.log" 2>&1; then
+    printf 'overlapping hardware windows unexpectedly passed\n' >&2
+    exit 1
+fi
+grep -Fq 'hardware windows overlap: window-03 and window-overlap' \
+    "$artifact_root/overlap.log"
+test ! -e "$artifact_root/overlap-output"
+
 cp -R "$artifact_root/runs/run-20" "$artifact_root/order-drift"
 sed 's/candidate-first/base-first/g' "$artifact_root/order-drift/alpine-aa.csv" \
     > "$artifact_root/order-drift/alpine-aa.tmp"

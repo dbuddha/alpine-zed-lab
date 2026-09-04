@@ -97,6 +97,22 @@ class PairedRendererSamplesTests(unittest.TestCase):
         window["gpu"] = "different-gpu"
         self.assertNotEqual(first, PAIRED.canonical_window_hash(window))
 
+    def test_independent_windows_reject_overlap_but_accept_adjacency(self):
+        first = {
+            "id": "window-01",
+            "started_at_utc": "2026-08-01T00:00:00Z",
+            "ended_at_utc": "2026-08-01T01:00:00Z",
+        }
+        second = {
+            "id": "window-02",
+            "started_at_utc": "2026-08-01T01:00:00Z",
+            "ended_at_utc": "2026-08-01T02:00:00Z",
+        }
+        PAIRED.validate_independent_windows([second, first])
+        second["started_at_utc"] = "2026-08-01T00:59:59Z"
+        with self.assertRaisesRegex(PAIRED.ProtocolError, "hardware windows overlap"):
+            PAIRED.validate_independent_windows([first, second])
+
     def test_nearest_rank_and_rounded_ratio_are_integer_deterministic(self):
         values = [10, 20, 30, 40]
         self.assertEqual(PAIRED.nearest_rank(values, 5_000), 20)
