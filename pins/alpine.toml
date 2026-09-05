@@ -1,6 +1,6 @@
 schema = "alpine-revision-pin/v3"
 repository = "https://github.com/dbuddha/alpine-gpui.git"
-commit = "58b261581e3fac53b449ab407917c0514f8339be"
+commit = "7ab25f127104d3e426ea027b38948775c8da212b"
 visibility = "public-proprietary"
 trace_manifest_path = "pins/alpine-traces.tsv"
 trace_manifest_sha256 = "afa696780de42292510c3b19bd60602149455fd921ceefc3f6e7f0dcf00b67d4"
