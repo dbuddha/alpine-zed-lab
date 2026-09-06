@@ -13,8 +13,10 @@ import platform
 import random
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -31,6 +33,13 @@ MINIMUM_RUNS = 20
 MINIMUM_WINDOWS = 4
 MAXIMUM_PAIRS = 1_000
 MAXIMUM_WARMUPS = 100_000
+SAMPLER_TIMEOUT_SECONDS = 900
+REJECTED_SCHEMA = "alpine-zed-rejected-renderer-capture/v1"
+REJECTED_FILE_BYTES = 64 * 1024
+REJECTED_PAYLOAD_BYTES = 8 * 1024 * 1024
+REJECTED_MANIFEST_BYTES = 8 * 1024 * 1024
+REJECTED_MAXIMUM_FILES = MAXIMUM_PAIRS * 12 + 8
+INCOMPLETE_CAPTURE = ".capture-in-progress"
 MINIMUM_BOOTSTRAP_RESAMPLES = 1_000
 MAXIMUM_BOOTSTRAP_RESAMPLES = 100_000
 MEASUREMENT_STAGE = "renderer-submit-readback"
@@ -245,6 +254,12 @@ def regular_file(path: Path, label: str) -> None:
         path.is_file() and not path.is_symlink(),
         f"{label} must be a regular non-symlink file: {path}",
     )
+    if path.name == "run.toml":
+        marker = path.parent / INCOMPLETE_CAPTURE
+        require(
+            not marker.exists() and not marker.is_symlink(),
+            f"capture is incomplete and cannot be admitted: {path.parent}",
+        )
 
 
 def executable(path_value: str, label: str) -> Path:
@@ -561,6 +576,7 @@ def invoke_sampler(
     output: Path,
     warmups: int,
     log: Path,
+    capture_context: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, int] | None]:
     require(
         not output.exists() and not output.is_symlink(),
@@ -586,16 +602,55 @@ def invoke_sampler(
         ]
     else:
         raise ProtocolError(f"unsupported sampler renderer: {renderer}")
-    result = run_command(arguments)
-    log.write_text(
-        f"command={json.dumps(arguments)}\nreturncode={result.returncode}\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
-        encoding="utf-8",
-    )
+    invocation = {
+        "renderer": renderer,
+        "command": arguments,
+        "csv": str(output),
+        "log": str(log),
+        "timeout_seconds": SAMPLER_TIMEOUT_SECONDS,
+        "state": "starting",
+        "returncode": None,
+    }
+    if capture_context is not None:
+        capture_context["invocation"] = invocation
+    with log.open("x", encoding="utf-8") as target:
+        target.write(f"command={json.dumps(arguments)}\n")
+    try:
+        result = run_command(arguments, timeout=SAMPLER_TIMEOUT_SECONDS)
+    except ProtocolError as error:
+        cause = error.__cause__
+        timed_out = isinstance(cause, subprocess.TimeoutExpired)
+        invocation["state"] = "timeout" if timed_out else "execution-error"
+        partial_stdout = getattr(cause, "stdout", None)
+        partial_stderr = getattr(cause, "stderr", None)
+        def decoded(value: str | bytes | None) -> str:
+            if value is None:
+                return ""
+            return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+        try:
+            with log.open("a", encoding="utf-8") as target:
+                target.write(
+                    f"returncode=unavailable\nstate={invocation['state']}\n"
+                    f"timeout_seconds={SAMPLER_TIMEOUT_SECONDS}\n"
+                    f"stdout:\n{decoded(partial_stdout)}\n"
+                    f"stderr:\n{decoded(partial_stderr)}\n"
+                    f"execution_error={str(error)[:4096]}\n"
+                )
+        except OSError as log_error:
+            invocation["log_error"] = str(log_error)[:4096]
+        raise
+    invocation["state"] = "exited"
+    invocation["returncode"] = result.returncode
+    with log.open("a", encoding="utf-8") as target:
+        target.write(
+            f"returncode={result.returncode}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
     require(
         result.returncode == 0,
         f"{renderer} sampler failed: {result.stderr.strip() or result.stdout.strip()}",
     )
+    invocation["state"] = "output-validation"
     elapsed = parse_sample_csv(output)
     if renderer == "alpine":
         for expected in (
@@ -612,6 +667,7 @@ def invoke_sampler(
                 expected in result.stdout,
                 f"Alpine sampler summary drifted: {expected}",
             )
+        invocation["state"] = "validated"
         return elapsed, None
     values = parse_key_values(result.stdout)
     expected_values = {
@@ -640,7 +696,152 @@ def invoke_sampler(
             f"GPUI adaptation counter drifted: {field}",
         )
         adaptation[field] = int(values[field])
+    invocation["state"] = "validated"
     return elapsed, adaptation
+
+
+def rejected_inventory(output: Path) -> list[tuple[Path, os.stat_result]]:
+    """Bound traversal before copying; never follow links or unknown subtrees."""
+    reject_symlink_path(output)
+    require(stat.S_ISDIR(output.lstat().st_mode), "capture source is not a directory")
+    top_names = {
+        INCOMPLETE_CAPTURE, ".pending-run.toml", "run.toml",
+        "alpine-aa.csv", "gpui-aa.csv", "alpine-gpui.csv", "gpui-adaptation.toml",
+    }
+    invocation_name = re.compile(
+        r"(?:(?:alpine-aa|gpui-aa)-[0-9]{4}-[01]-(?:base|candidate)-(?:alpine|gpui)"
+        r"|cross-[0-9]{4}-[01]-(?:alpine|gpui))\.(?:csv|log)$"
+    )
+    found: list[tuple[Path, os.stat_result]] = []
+
+    def add(path: Path) -> None:
+        information = path.lstat()
+        require(
+            stat.S_ISREG(information.st_mode) and information.st_nlink == 1,
+            f"rejected evidence must be a regular unlinked file: {path}",
+        )
+        require(len(found) < REJECTED_MAXIMUM_FILES, "rejected evidence file limit exceeded")
+        found.append((path, information))
+
+    with os.scandir(output) as entries:
+        for entry in entries:
+            path = Path(entry.path)
+            if entry.name == "invocations":
+                require(entry.is_dir(follow_symlinks=False), "unsafe invocation directory")
+                with os.scandir(path) as invocations:
+                    for invocation in invocations:
+                        require(
+                            invocation_name.fullmatch(invocation.name) is not None,
+                            f"unexpected invocation evidence path: {invocation.name}",
+                        )
+                        add(Path(invocation.path))
+            else:
+                require(entry.name in top_names, f"unexpected capture evidence path: {entry.name}")
+                add(path)
+    return found
+
+
+def retained_prefix(source: Path, information: os.stat_result, target: Path, limit: int) -> bytes:
+    """Read at most one file allowance, rejecting replacement and special files."""
+    def identity(value: os.stat_result) -> tuple[int, ...]:
+        return (
+            value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+            value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+        )
+
+    reject_symlink_path(source)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(source, flags), "rb") as handle:
+        require(identity(os.fstat(handle.fileno())) == identity(information), "source evidence changed")
+        payload = handle.read(min(limit, information.st_size))
+        require(len(payload) == min(limit, information.st_size), "source evidence was truncated during copy")
+        require(identity(os.fstat(handle.fileno())) == identity(information), "source evidence changed during copy")
+    require(identity(source.lstat()) == identity(information), "source evidence path was replaced")
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    require(sha256_file(target) == hashlib.sha256(payload).hexdigest(), "retained payload hash mismatch")
+    return payload
+
+
+def retain_rejected_capture(output: Path, context: dict[str, Any], error: BaseException) -> Path:
+    """Seal a bounded diagnostic copy, never delete the only original evidence."""
+    inventory = rejected_inventory(output)
+    reject_symlink_path(output.parent)
+    rejected = Path(tempfile.mkdtemp(prefix=".rejected-paired-", dir=output.parent))
+    try:
+        (rejected / "raw").mkdir(mode=0o700)
+        (rejected / "raw" / "invocations").mkdir(mode=0o700)
+        invocation = context.get("invocation") or {}
+        active = {invocation.get("csv"), invocation.get("log")}
+        inventory.sort(key=lambda item: (
+            0 if str(item[0]) in active else 1 if item[0].suffix == ".csv" else 2,
+            str(item[0].relative_to(output)),
+        ))
+        remaining = REJECTED_PAYLOAD_BYTES
+        records = []
+        for source, information in inventory:
+            relative = source.relative_to(output)
+            exported = relative
+            if relative.name == "run.toml":
+                exported = Path("unpublished-run.toml")
+            elif relative.name == ".pending-run.toml":
+                exported = Path("pending-run.toml")
+            limit = min(REJECTED_FILE_BYTES, remaining)
+            record = {
+                "source": str(relative), "source_bytes": information.st_size,
+                "retained_path": None, "retained_bytes": 0,
+                "retained_sha256": None, "source_sha256": None,
+                "truncated": information.st_size > 0,
+                "omission": "total-payload-budget",
+            }
+            if limit > 0 or information.st_size == 0:
+                target = rejected / "raw" / exported
+                payload = retained_prefix(source, information, target, limit)
+                digest = hashlib.sha256(payload).hexdigest()
+                truncated = len(payload) != information.st_size
+                record.update({
+                    "retained_path": str(target.relative_to(rejected)),
+                    "retained_bytes": len(payload), "retained_sha256": digest,
+                    "source_sha256": None if truncated else digest,
+                    "truncated": truncated,
+                    "omission": "prefix-only; full source digest not measured" if truncated else None,
+                })
+                remaining -= len(payload)
+            records.append(record)
+        message = str(error)
+        receipt = {
+            "schema": REJECTED_SCHEMA, "state": "rejected",
+            "performance_qualified": False, "performance_claim": "none",
+            "original_path": str(output), "original_preserved": True,
+            "scope": "rejected-attempt-diagnostics-only",
+            "context": context,
+            "failure": {"type": type(error).__name__, "message": message[:4096], "message_truncated": len(message) > 4096},
+            "limits": {
+                "per_file_bytes": REJECTED_FILE_BYTES, "payload_bytes": REJECTED_PAYLOAD_BYTES,
+                "manifest_bytes": REJECTED_MANIFEST_BYTES, "maximum_files": REJECTED_MAXIMUM_FILES,
+            },
+            "payload_bytes": REJECTED_PAYLOAD_BYTES - remaining,
+            "files": records,
+            "omissions": ["physical-performance-qualification", "process-tree-quiescence", "original-working-directory-byte-bound"],
+        }
+        encoded = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        require(len(encoded) <= REJECTED_MANIFEST_BYTES, "rejected manifest byte limit exceeded")
+        pending = rejected / "rejection.pending.json"
+        descriptor = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        require(sha256_file(pending) == hashlib.sha256(encoded).hexdigest(), "rejected manifest hash mismatch")
+        os.rename(pending, rejected / "rejection.json")
+        return rejected
+    except Exception as retention_error:
+        raise ProtocolError(
+            f"rejected retention incomplete at {rejected}; originals preserved at {output}: {retention_error}"
+        ) from retention_error
 
 
 def write_csv(
@@ -698,6 +899,7 @@ def invoke_same_renderer_pair(
     warmups: int,
     invocation_dir: Path,
     adaptations: list[dict[str, int]],
+    capture_context: dict[str, Any],
 ) -> tuple[int, int]:
     roles = (
         ["base", "candidate"]
@@ -714,6 +916,7 @@ def invoke_same_renderer_pair(
             invocation_dir / f"{stem}.csv",
             warmups,
             invocation_dir / f"{stem}.log",
+            capture_context,
         )
         values[role] = elapsed
         if adaptation is not None:
@@ -730,6 +933,7 @@ def invoke_cross_pair(
     warmups: int,
     invocation_dir: Path,
     adaptations: list[dict[str, int]],
+    capture_context: dict[str, Any],
 ) -> tuple[int, int]:
     renderers = (
         ["alpine", "gpui"]
@@ -747,6 +951,7 @@ def invoke_cross_pair(
             invocation_dir / f"{stem}.csv",
             warmups,
             invocation_dir / f"{stem}.log",
+            capture_context,
         )
         values[renderer] = elapsed
         if adaptation is not None:
@@ -783,11 +988,32 @@ def capture(arguments: argparse.Namespace) -> None:
 
     output.parent.mkdir(parents=True, exist_ok=True)
     reject_symlink_path(output.parent)
-    output.mkdir()
-    complete = False
+    output.mkdir(mode=0o700)
+    context: dict[str, Any] = {
+        "phase": "initialize", "run_id": arguments.run_id,
+        "seed": arguments.seed, "pairs": arguments.pairs, "warmups": arguments.warmups,
+        "measurement_stage": MEASUREMENT_STAGE, "clock": CLOCK,
+        "identities": {key: pins[key] for key in (
+            "lab_revision", "alpine_revision", "zed_revision",
+            "trace_manifest_sha256", "patch_series_sha256",
+        )},
+        "trace": {key: trace[key] for key in ("id", "schema", "path", "trace_sha256", "workload_hash")},
+        "window": window, "environment_hash": canonical_window_hash(window),
+        "equivalence": equivalence_identity,
+        "samplers": {
+            "alpine": {"path": str(alpine_binary), "sha256": None},
+            "gpui": {"path": str(gpui_binary), "sha256": None},
+        },
+        "sampler_digest_boundary": "before-admission", "invocation": None,
+    }
     try:
+        with (output / INCOMPLETE_CAPTURE).open("x", encoding="utf-8") as marker:
+            marker.write("Incomplete capture: run.toml must not be admitted while this marker exists.\n")
+        context["phase"] = "sampler-identity"
+        context["samplers"]["alpine"]["sha256"] = sha256_file(alpine_binary)
+        context["samplers"]["gpui"]["sha256"] = sha256_file(gpui_binary)
         invocation_dir = output / "invocations"
-        invocation_dir.mkdir()
+        invocation_dir.mkdir(mode=0o700)
         adaptations: list[dict[str, int]] = []
         alpine_rows = []
         gpui_rows = []
@@ -800,6 +1026,7 @@ def capture(arguments: argparse.Namespace) -> None:
             arguments.seed, "cross-renderer", arguments.pairs
         )
         for index in range(arguments.pairs):
+            context["phase"] = f"alpine-aa:{index}"
             alpine_base, alpine_candidate = invoke_same_renderer_pair(
                 "alpine",
                 "alpine-aa",
@@ -810,7 +1037,9 @@ def capture(arguments: argparse.Namespace) -> None:
                 arguments.warmups,
                 invocation_dir,
                 adaptations,
+                context,
             )
+            context["phase"] = f"gpui-aa:{index}"
             gpui_base, gpui_candidate = invoke_same_renderer_pair(
                 "gpui",
                 "gpui-aa",
@@ -821,7 +1050,9 @@ def capture(arguments: argparse.Namespace) -> None:
                 arguments.warmups,
                 invocation_dir,
                 adaptations,
+                context,
             )
+            context["phase"] = f"cross-renderer:{index}"
             cross_base, cross_candidate = invoke_cross_pair(
                 index,
                 cross_orders[index],
@@ -831,6 +1062,7 @@ def capture(arguments: argparse.Namespace) -> None:
                 arguments.warmups,
                 invocation_dir,
                 adaptations,
+                context,
             )
             alpine_rows.append(
                 (
@@ -860,6 +1092,7 @@ def capture(arguments: argparse.Namespace) -> None:
                 )
             )
 
+        context["phase"] = "aggregate-publication"
         require(adaptations, "GPUI sampling produced no adaptation evidence")
         canonical_adaptation = adaptations[0]
         require(
@@ -928,11 +1161,22 @@ def capture(arguments: argparse.Namespace) -> None:
                 "",
             ]
         )
-        (output / "run.toml").write_text(manifest, encoding="utf-8")
-        complete = True
-    finally:
-        if not complete:
-            shutil.rmtree(output, ignore_errors=True)
+        context["phase"] = "manifest-publication"
+        pending = output / ".pending-run.toml"
+        with pending.open("x", encoding="utf-8") as target:
+            target.write(manifest)
+            target.flush()
+            os.fsync(target.fileno())
+        require(not (output / "run.toml").exists(), "run manifest collision")
+        os.replace(pending, output / "run.toml")
+        (output / INCOMPLETE_CAPTURE).unlink()
+    except BaseException as error:
+        try:
+            rejected = retain_rejected_capture(output, context, error)
+            print(f"rejected_capture={rejected}; original_preserved={output}; performance_claim=none", file=sys.stderr)
+        except Exception as retention_error:
+            print(f"rejected_retention_failed={retention_error}; original_preserved={output}", file=sys.stderr)
+        raise
     print(
         f"captured {arguments.run_id} with {arguments.pairs} paired samples per lane; "
         "performance_qualified=false performance_claim=none"
@@ -1966,7 +2210,7 @@ def main() -> int:
         arguments = parser().parse_args()
         arguments.handler(arguments)
         return 0
-    except ProtocolError as error:
+    except (ProtocolError, OSError) as error:
         print(f"paired renderer protocol error: {error}", file=sys.stderr)
         return 1
 
