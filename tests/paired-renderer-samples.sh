@@ -475,7 +475,7 @@ for scenario in ("nonzero", "malformed", "timeout", "later-step", "marker-close"
     if scenario == "marker-close":
         assert (output / "run.toml").is_file()
         try:
-            paired.regular_file(output / "run.toml", "failed run")
+            paired.regular_file((output / "run.toml").resolve(), "failed run")
         except paired.ProtocolError as error:
             assert "capture is incomplete" in str(error)
         else:
