@@ -368,7 +368,120 @@ if scripts/run-paired-renderer-samples.sh capture \
     printf 'malformed sampler output unexpectedly passed\n' >&2
     exit 1
 fi
-test ! -e "$artifact_root/malformed"
+test -f "$artifact_root/malformed/.capture-in-progress"
+test ! -e "$artifact_root/malformed/run.toml"
+
+python3 - "$artifact_root" <<'PY'
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+import sys
+from pathlib import Path
+from unittest import mock
+
+spec = importlib.util.spec_from_file_location("paired_retention", "scripts/paired_renderer_samples.py")
+assert spec is not None and spec.loader is not None
+paired = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(paired)
+root = Path(sys.argv[1])
+bad = root / "bin/retention-failing-sampler"
+bad.write_text(
+    f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\n"
+    "Path(sys.argv[3]).write_text('partial rejected csv\\n')\n"
+    "print('retained-nonzero-stdout', flush=True)\n"
+    "print('retained-nonzero-stderr', file=sys.stderr, flush=True)\n"
+    "raise SystemExit(17)\n"
+)
+bad.chmod(0o700)
+timeout = root / "bin/retention-timeout-sampler"
+timeout.write_text(
+    f"#!{sys.executable}\nimport sys, time\nfrom pathlib import Path\n"
+    "Path(sys.argv[3]).write_text('partial timeout csv\\n')\n"
+    "print('retained-timeout-stdout', flush=True)\n"
+    "print('retained-timeout-stderr', file=sys.stderr, flush=True)\n"
+    "time.sleep(30)\n"
+)
+timeout.chmod(0o700)
+
+for scenario in ("nonzero", "malformed", "timeout", "later-step", "marker-close", "retention-failure", "hash-failure"):
+    output = root / f"retention-{scenario}"
+    gpui = root / "bin/gpui-sampler" if scenario in ("later-step", "marker-close") else root / "bin/bad-gpui-sampler" if scenario == "malformed" else timeout if scenario == "timeout" else bad
+    arguments = paired.parser().parse_args([
+        "capture", "--output", str(output), "--equivalence", str(root / "equivalence"),
+        "--trace-id", "realistic-code-viewport", "--window", str(root / "windows/window-01.toml"),
+        "--run-id", f"retention-{scenario}", "--seed", "5" * 64, "--warmups", "2", "--pairs", "2",
+        "--alpine-sampler", str(root / "bin/alpine-sampler"), "--gpui-sampler", str(gpui), "--allow-test-fixture",
+    ])
+    before = set(root.glob(".rejected-paired-*"))
+    stderr = io.StringIO()
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(contextlib.redirect_stderr(stderr))
+        if scenario == "timeout":
+            stack.enter_context(mock.patch.object(paired, "SAMPLER_TIMEOUT_SECONDS", 1))
+        elif scenario == "later-step":
+            stack.enter_context(mock.patch.object(paired, "write_csv", side_effect=OSError("aggregate failure")))
+        elif scenario == "marker-close":
+            unlink = Path.unlink
+            def fail_marker(path, *args, **kwargs):
+                if path.name == paired.INCOMPLETE_CAPTURE:
+                    raise OSError("marker close failure")
+                return unlink(path, *args, **kwargs)
+            stack.enter_context(mock.patch.object(Path, "unlink", fail_marker))
+        elif scenario == "retention-failure":
+            stack.enter_context(mock.patch.object(paired.tempfile, "mkdtemp", side_effect=OSError("archive creation failure")))
+        elif scenario == "hash-failure":
+            original_hash = paired.sha256_file
+            def bad_archive_hash(path):
+                return "0" * 64 if any(part.startswith(".rejected-paired-") for part in path.parts) else original_hash(path)
+            stack.enter_context(mock.patch.object(paired, "sha256_file", bad_archive_hash))
+        try:
+            paired.capture(arguments)
+        except (paired.ProtocolError, OSError):
+            pass
+        else:
+            raise AssertionError(f"rejected scenario unexpectedly passed: {scenario}")
+    (root / f"retention-{scenario}.log").write_text(stderr.getvalue())
+    assert (output / paired.INCOMPLETE_CAPTURE).is_file(), scenario
+    assert output.stat().st_mode & 0o777 == 0o700, scenario
+    assert len(list((output / "invocations").glob("alpine-aa-*.csv"))) >= 2, scenario
+    assert any("command=" in path.read_text() for path in (output / "invocations").glob("*.log")), scenario
+    archives = set(root.glob(".rejected-paired-*")) - before
+    if scenario in ("retention-failure", "hash-failure"):
+        assert "rejected_retention_failed=" in stderr.getvalue(), scenario
+        assert not any((archive / "rejection.json").exists() for archive in archives), scenario
+        continue
+    assert len(archives) == 1, scenario
+    archive = archives.pop()
+    record = json.loads((archive / "rejection.json").read_text())
+    assert record["state"] == "rejected" and record["performance_claim"] == "none", scenario
+    assert record["context"]["identities"]["lab_revision"] == paired.read_pins()["lab_revision"], scenario
+    assert record["context"]["trace"]["id"] == "realistic-code-viewport", scenario
+    assert record["context"]["environment_hash"] == paired.canonical_window_hash(record["context"]["window"]), scenario
+    assert not any(path.name == "run.toml" for path in archive.rglob("*")), scenario
+    for item in record["files"]:
+        if item["retained_path"] is not None:
+            payload = (archive / item["retained_path"]).read_bytes()
+            assert hashlib.sha256(payload).hexdigest() == item["retained_sha256"], scenario
+    if scenario == "nonzero":
+        assert record["context"]["invocation"]["returncode"] == 17
+    if scenario == "timeout":
+        assert record["context"]["invocation"]["state"] == "timeout"
+        assert record["context"]["invocation"]["returncode"] is None
+        assert any("retained-timeout-stderr" in path.read_text() for path in (archive / "raw/invocations").glob("*.log"))
+    if scenario in ("later-step", "marker-close"):
+        assert len(list((archive / "raw/invocations").glob("*.csv"))) == 12
+    if scenario == "marker-close":
+        assert (output / "run.toml").is_file()
+        try:
+            paired.regular_file(output / "run.toml", "failed run")
+        except paired.ProtocolError as error:
+            assert "capture is incomplete" in str(error)
+        else:
+            raise AssertionError("unsealed run manifest was admitted")
+print("production rejected-capture controls passed")
+PY
 
 sed 's/shader_mode = "offline-metallib"/shader_mode = "runtime-source"/' \
     "$artifact_root/windows/window-01.toml" > "$artifact_root/windows/unsupported.toml"

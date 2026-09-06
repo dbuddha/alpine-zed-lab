@@ -1,8 +1,14 @@
 import csv
+import hashlib
 import importlib.util
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts/paired_renderer_samples.py"
@@ -146,6 +152,135 @@ class PairedRendererSamplesTests(unittest.TestCase):
             )
             with self.assertRaises(PAIRED.ProtocolError):
                 PAIRED.parse_composed_csv(path, bindings)
+
+    def make_rejected_source(self, directory):
+        output = Path(directory) / "attempt"
+        output.mkdir(mode=0o700)
+        (output / "invocations").mkdir()
+        (output / PAIRED.INCOMPLETE_CAPTURE).write_text("incomplete\n")
+        sample = output / "invocations/alpine-aa-0000-0-base-alpine.csv"
+        sample.write_bytes(b"sample_index,elapsed_ns\n0,17\n")
+        return output, sample
+
+    def test_rejected_copy_is_private_hash_bound_unique_and_non_destructive(self):
+        with self.temporary_directory() as directory:
+            output, sample = self.make_rejected_source(directory)
+            (output / "run.toml").write_text("unpublished manifest\n")
+            context = {"phase": "manifest-publication", "invocation": None}
+            first = PAIRED.retain_rejected_capture(output, context, OSError("publication failed"))
+            original_receipt = (first / "rejection.json").read_bytes()
+            second = PAIRED.retain_rejected_capture(output, context, OSError("publication failed"))
+            self.assertNotEqual(first, second)
+            self.assertEqual((first / "rejection.json").read_bytes(), original_receipt)
+            self.assertEqual(first.stat().st_mode & 0o777, 0o700)
+            record = json.loads(original_receipt)
+            self.assertEqual(record["state"], "rejected")
+            self.assertFalse(record["performance_qualified"])
+            self.assertEqual(record["performance_claim"], "none")
+            self.assertTrue(record["original_preserved"])
+            self.assertTrue(sample.is_file())
+            self.assertFalse(any(path.name == "run.toml" for path in first.rglob("*")))
+            for item in record["files"]:
+                payload = (first / item["retained_path"]).read_bytes()
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), item["retained_sha256"])
+                self.assertEqual(len(payload), item["retained_bytes"])
+            with self.assertRaisesRegex(PAIRED.ProtocolError, "capture is incomplete"):
+                PAIRED.regular_file(output / "run.toml", "run manifest")
+
+    def test_rejected_prefix_and_total_budgets_preserve_full_originals(self):
+        with self.temporary_directory() as directory:
+            output, sample = self.make_rejected_source(directory)
+            sample.write_bytes(b"x" * (PAIRED.REJECTED_FILE_BYTES + 1))
+            context = {"phase": "validation", "invocation": {"csv": str(sample)}}
+            rejected = PAIRED.retain_rejected_capture(output, context, ValueError("oversized"))
+            record = json.loads((rejected / "rejection.json").read_text())
+            item = next(value for value in record["files"] if value["source"].endswith(".csv"))
+            self.assertEqual(item["retained_bytes"], PAIRED.REJECTED_FILE_BYTES)
+            self.assertTrue(item["truncated"])
+            self.assertIsNone(item["source_sha256"])
+            self.assertEqual(sample.stat().st_size, PAIRED.REJECTED_FILE_BYTES + 1)
+            with mock.patch.object(PAIRED, "REJECTED_PAYLOAD_BYTES", 10):
+                limited = PAIRED.retain_rejected_capture(output, context, ValueError("limited"))
+            limited_record = json.loads((limited / "rejection.json").read_text())
+            self.assertEqual(limited_record["payload_bytes"], 10)
+            self.assertEqual(sum(item["retained_bytes"] for item in limited_record["files"]), 10)
+            self.assertTrue(any(item["retained_path"] is None for item in limited_record["files"]))
+
+    def test_rejected_copy_refuses_symlinks_hardlinks_unknown_paths_and_file_overflow(self):
+        for kind in ("symlink", "hardlink", "unknown", "overflow"):
+            with self.subTest(kind=kind), self.temporary_directory() as directory:
+                output, sample = self.make_rejected_source(directory)
+                external = Path(directory) / "outside.txt"
+                external.write_text("outside sentinel\n")
+                if kind in ("symlink", "hardlink"):
+                    sample.unlink()
+                    if kind == "symlink":
+                        sample.symlink_to(external)
+                    else:
+                        os.link(external, sample)
+                elif kind == "unknown":
+                    (output / "unexpected").mkdir()
+                with mock.patch.object(PAIRED, "REJECTED_MAXIMUM_FILES", 0 if kind == "overflow" else PAIRED.REJECTED_MAXIMUM_FILES):
+                    with self.assertRaises(PAIRED.ProtocolError):
+                        PAIRED.retain_rejected_capture(output, {}, ValueError("invalid"))
+                self.assertEqual(external.read_text(), "outside sentinel\n")
+                self.assertTrue(output.is_dir())
+
+    def test_rejected_copy_hash_manifest_budget_and_creation_failures_leave_originals(self):
+        for failure in ("hash", "manifest-budget", "creation"):
+            with self.subTest(failure=failure), self.temporary_directory() as directory:
+                output, sample = self.make_rejected_source(directory)
+                before = sample.read_bytes()
+                if failure == "hash":
+                    patch = mock.patch.object(PAIRED, "sha256_file", return_value="0" * 64)
+                elif failure == "manifest-budget":
+                    patch = mock.patch.object(PAIRED, "REJECTED_MANIFEST_BYTES", 1)
+                else:
+                    patch = mock.patch.object(PAIRED.tempfile, "mkdtemp", side_effect=OSError("retention unavailable"))
+                with patch, self.assertRaises((PAIRED.ProtocolError, OSError)):
+                    PAIRED.retain_rejected_capture(output, {}, ValueError("failure"))
+                self.assertEqual(sample.read_bytes(), before)
+                self.assertFalse(list(Path(directory).glob(".rejected-paired-*/rejection.json")))
+
+    def test_real_sampler_timeout_preserves_partial_streams_and_unknown_status(self):
+        with self.temporary_directory() as directory:
+            output, sample = self.make_rejected_source(directory)
+            sample.unlink()
+            sampler = Path(directory) / "timeout-sampler"
+            sampler.write_text(
+                f"#!{sys.executable}\nimport sys, time\n"
+                "print('partial-timeout-stdout', flush=True)\n"
+                "print('partial-timeout-stderr', file=sys.stderr, flush=True)\n"
+                "time.sleep(30)\n"
+            )
+            sampler.chmod(0o700)
+            log = sample.with_suffix(".log")
+            context = {}
+            with mock.patch.object(PAIRED, "SAMPLER_TIMEOUT_SECONDS", 1):
+                with self.assertRaises(PAIRED.ProtocolError) as caught:
+                    PAIRED.invoke_sampler("alpine", sampler, {"absolute_path": "unused"}, sample, 2, log, context)
+            self.assertIsInstance(caught.exception.__cause__, subprocess.TimeoutExpired)
+            retained = log.read_text()
+            self.assertIn("partial-timeout-stdout", retained)
+            self.assertIn("partial-timeout-stderr", retained)
+            self.assertIn("returncode=unavailable", retained)
+            self.assertEqual(context["invocation"]["state"], "timeout")
+            self.assertIsNone(context["invocation"]["returncode"])
+
+    def test_spawn_failure_and_output_collision_do_not_invent_success(self):
+        with self.temporary_directory() as directory:
+            output, sample = self.make_rejected_source(directory)
+            log = sample.with_suffix(".log")
+            with self.assertRaisesRegex(PAIRED.ProtocolError, "sampler output collision"):
+                PAIRED.invoke_sampler("alpine", Path(directory) / "missing", {"absolute_path": "unused"}, sample, 2, log)
+            self.assertFalse(log.exists())
+            sample.unlink()
+            context = {}
+            with self.assertRaises(PAIRED.ProtocolError):
+                PAIRED.invoke_sampler("alpine", Path(directory) / "missing", {"absolute_path": "unused"}, sample, 2, log, context)
+            self.assertEqual(context["invocation"]["state"], "execution-error")
+            self.assertIsNone(context["invocation"]["returncode"])
+            self.assertIn("returncode=unavailable", log.read_text())
 
 
 if __name__ == "__main__":
