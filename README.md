@@ -146,6 +146,12 @@ ordinary `--benchmark` path contains no stage probes and is never corrected by
 subtracting profile stages. Profile output is explanatory E3 input only; it is
 not timing qualification or evidence that either renderer is faster.
 
+Profile/v2 appends `caller_elapsed_ns` at the ordinary owned-image-return
+boundary while preserving internal `total_ns`. Validate it with
+`python3 scripts/validate_gpui_profile.py OUTPUT.csv SAMPLES`; old profile/v1
+records are not interchangeable caller measurements. See the
+[boundary map and acceptance contract](docs/gpui-profiled-caller-boundary.md).
+
 To reproduce the source-assurance gates locally, install the pinned
 `cargo-llvm-cov` and `cargo-mutants` versions shown in CI, then run:
 
