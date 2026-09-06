@@ -355,29 +355,15 @@ if [ "$shader_mode" = offline-metallib ]; then
         -p alpine_trace_adapter \
         -- --profile "$sampling_trace" "$sampling_dir/gpui-metal-profile.csv" 2 3 \
         > "$sampling_dir/gpui-metal-profile.log"
-    [ "$(adapter_value schema "$sampling_dir/gpui-metal-profile.log")" = alpine-zed-gpui-renderer-profile/v1 ] || { printf 'GPUI profile schema drifted\n' >&2; exit 1; }
+    [ "$(adapter_value schema "$sampling_dir/gpui-metal-profile.log")" = alpine-zed-gpui-renderer-profile/v2 ] || { printf 'GPUI profile schema drifted\n' >&2; exit 1; }
     [ "$(adapter_value id "$sampling_dir/gpui-metal-profile.log")" = realistic-code-viewport ] || { printf 'GPUI profile fixture drifted\n' >&2; exit 1; }
     [ "$(adapter_value observer_perturbed "$sampling_dir/gpui-metal-profile.log")" = true ] || { printf 'GPUI profile observer marker drifted\n' >&2; exit 1; }
     [ "$(adapter_value ordinary_samples_unchanged "$sampling_dir/gpui-metal-profile.log")" = true ] || { printf 'GPUI ordinary-sample marker drifted\n' >&2; exit 1; }
     [ "$(adapter_value performance_qualified "$sampling_dir/gpui-metal-profile.log")" = false ] || { printf 'GPUI profile qualification marker drifted\n' >&2; exit 1; }
-    awk -F, '
-        NR == 1 {
-            expected = "sample_index,resource_preparation_ns,instance_write_ns,command_buffer_ns,render_encoding_ns,readback_encoding_performed,readback_encoding_ns,commit_ns,completion_wait_ns,gpu_execution_available,gpu_execution_ns,readback_compaction_ns,total_ns"
-            if ($0 != expected) exit 1
-            next
-        }
-        $1 != NR - 2 { exit 1 }
-        $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || $5 !~ /^[0-9]+$/ { exit 1 }
-        $6 != "true" && $6 != "false" { exit 1 }
-        $6 == "true" && $7 !~ /^[0-9]+$/ { exit 1 }
-        $6 == "false" && $7 != "" { exit 1 }
-        $8 !~ /^[0-9]+$/ || $9 !~ /^[0-9]+$/ { exit 1 }
-        $10 != "true" && $10 != "false" { exit 1 }
-        $10 == "true" && $11 !~ /^[0-9]+$/ { exit 1 }
-        $10 == "false" && $11 != "" { exit 1 }
-        $12 !~ /^[0-9]+$/ || $13 !~ /^[0-9]+$/ || $13 == 0 { exit 1 }
-        END { if (NR != 4) exit 1 }
-    ' "$sampling_dir/gpui-metal-profile.csv" || { printf 'GPUI profile CSV drifted\n' >&2; exit 1; }
+    [ "$(adapter_value caller_endpoint "$sampling_dir/gpui-metal-profile.log")" = owned-image-return ] || { printf 'GPUI caller endpoint drifted\n' >&2; exit 1; }
+    [ "$(adapter_value inner_totals "$sampling_dir/gpui-metal-profile.log")" = unchanged ] || { printf 'GPUI internal totals drifted\n' >&2; exit 1; }
+    python3 "$repo_root/scripts/validate_gpui_profile.py" "$sampling_dir/gpui-metal-profile.csv" 3 \
+        > "$sampling_dir/gpui-metal-profile-validation.log"
 fi
 
 sequence_dir="$output_absolute/atlas-lifecycle"
