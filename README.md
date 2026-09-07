@@ -205,3 +205,7 @@ owned by Alpine Tasks #470 through #472 and Requirement #53.
 - Pinned research: <https://github.com/dbuddha/alpine-gpui/issues/27>
 - Isolation decision: <https://github.com/dbuddha/alpine-gpui/issues/41>
 - License: [GPL-3.0-or-later](LICENSE)
+
+## Studio-derived trace candidates
+
+Use the [raw Studio scene conversion guide](docs/studio-scene-trace-candidates.md) to prepare unqualified v2 candidates. Conversion does not establish native provenance, editor representativeness, output equivalence, or performance.
