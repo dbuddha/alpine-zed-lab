@@ -8,7 +8,8 @@ for script in scripts/*.sh scripts/lib/*.sh tests/*.sh; do
     sh -n "$script"
 done
 
-python3 -m py_compile scripts/paired_renderer_samples.py tests/test_paired_renderer_samples.py
+python3 -m py_compile scripts/paired_renderer_samples.py tests/test_paired_renderer_samples.py \
+    scripts/studio_scene_trace.py tests/test_studio_scene_trace.py
 python3 -m unittest discover -s tests -p 'test_*.py'
 
 scripts/check-pin.sh
