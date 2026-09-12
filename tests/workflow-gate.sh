@@ -34,6 +34,15 @@ PY
 }
 
 assert_rejected missing-job '  ci-pass:' '  ci-pass-removed:'
+assert_rejected metadata-restarts \
+    '    types: [opened, synchronize, reopened]' \
+    '    types: [opened, synchronize, reopened, edited, labeled]'
+assert_rejected mandatory-coverage \
+    "          ALPINE_ZED_COVERAGE: \${{ github.event_name == 'workflow_dispatch' && inputs.coverage && '1' || '0' }}" \
+    '          ALPINE_ZED_COVERAGE: "1"'
+assert_rejected mandatory-mutation \
+    "          ALPINE_ZED_MUTATION: \${{ github.event_name == 'workflow_dispatch' && inputs.mutation && '1' || '0' }}" \
+    '          ALPINE_ZED_MUTATION: "1"'
 assert_rejected missing-stable-name '    name: ci-pass' '    name: aggregate-removed'
 assert_rejected missing-always '  ci-pass:
     name: ci-pass
