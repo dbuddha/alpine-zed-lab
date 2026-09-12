@@ -113,8 +113,12 @@ case "$work_root" in
     "$repo_root"/.lab/physical-sampler.*) ;;
     *) fail 'temporary worktree escaped the lab root' ;;
 esac
-variant_checkout="$work_root/zed"
-target_root="$work_root/target"
+variant_checkout="$repo_root/.lab/variants/alpine-metal"
+[ ! -e "$variant_checkout" ] && [ ! -L "$variant_checkout" ] || fail 'variant checkout already exists'
+mkdir -p "$repo_root/.lab/variants"
+# Cargo revalidates the pinned sources and flags. Share the release cache with
+# the immediately preceding oracle run; never accept a caller-supplied binary.
+target_root="$repo_root/.lab/target"
 candidate="$work_root/candidate"
 bundle="$candidate/physical-samplers"
 cleanup() {
@@ -139,19 +143,29 @@ zed_toolchain=$(sed -nE 's/^channel = "([^"]+)"$/\1/p' "$variant_checkout/rust-t
 alpine_toolchain=$(sed -nE 's/^channel = "([^"]+)"$/\1/p' .lab/alpine/rust-toolchain.toml)
 [ -n "$zed_toolchain" ] && [ -n "$alpine_toolchain" ] || fail 'pinned Rust toolchain is missing'
 
-CARGO_TARGET_DIR="$target_root/zed" cargo "+$zed_toolchain" build \
+CARGO_TARGET_DIR="$target_root/zed-adapter" cargo "+$zed_toolchain" build \
     --release --locked --manifest-path "$variant_checkout/Cargo.toml" \
     -p alpine_trace_adapter
 CARGO_TARGET_DIR="$target_root/alpine" cargo "+$alpine_toolchain" build \
     --release --locked --manifest-path .lab/alpine/Cargo.toml \
     -p alpine-assurance
 
-gpui_binary="$target_root/zed/release/alpine_trace_adapter"
+gpui_binary="$target_root/zed-adapter/release/alpine_trace_adapter"
 alpine_binary="$target_root/alpine/release/alpine-assurance"
 [ -x "$gpui_binary" ] && [ -x "$alpine_binary" ] || fail 'release sampler executable is missing'
-gpui_metallibs=$(find "$target_root/zed/release/build" -type f -path '*/out/shaders.metallib' -print)
-[ "$(printf '%s\n' "$gpui_metallibs" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || fail 'expected exactly one generated GPUI metallib'
-gpui_metallib=$gpui_metallibs
+gpui_metallibs=$(find "$target_root/zed-adapter/release/build" -type f -path '*/out/shaders.metallib' -print)
+gpui_metallib=
+while IFS= read -r candidate_metallib; do
+    [ -n "$candidate_metallib" ] || continue
+    if [ -z "$gpui_metallib" ]; then
+        gpui_metallib=$candidate_metallib
+    else
+        cmp -s "$gpui_metallib" "$candidate_metallib" || fail 'release cache contains conflicting GPUI metallibs'
+    fi
+done <<EOF
+$gpui_metallibs
+EOF
+[ -n "$gpui_metallib" ] || fail 'generated GPUI metallib is missing'
 alpine_metallib=.lab/alpine/shaders/offscreen.metallib
 [ -f "$alpine_metallib" ] && [ ! -L "$alpine_metallib" ] || fail 'pinned Alpine metallib is missing'
 
