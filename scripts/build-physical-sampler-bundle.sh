@@ -148,7 +148,8 @@ alpine_toolchain=$(sed -nE 's/^channel = "([^"]+)"$/\1/p' .lab/alpine/rust-toolc
 
 CARGO_TARGET_DIR="$target_root/zed-adapter" cargo "+$zed_toolchain" build \
     --release --locked --manifest-path "$variant_checkout/Cargo.toml" \
-    -p alpine_trace_adapter
+    -p alpine_trace_adapter --message-format=json-render-diagnostics \
+    > "$work_root/gpui-build.jsonl"
 CARGO_TARGET_DIR="$target_root/alpine" cargo "+$alpine_toolchain" build \
     --release --locked --manifest-path .lab/alpine/Cargo.toml \
     -p alpine-assurance
@@ -156,19 +157,12 @@ CARGO_TARGET_DIR="$target_root/alpine" cargo "+$alpine_toolchain" build \
 gpui_binary="$target_root/zed-adapter/release/alpine_trace_adapter"
 alpine_binary="$target_root/alpine/release/alpine-assurance"
 [ -x "$gpui_binary" ] && [ -x "$alpine_binary" ] || fail 'release sampler executable is missing'
-gpui_metallibs=$(find "$target_root/zed-adapter/release/build" -type f -path '*/out/shaders.metallib' -print)
-gpui_metallib=
-while IFS= read -r candidate_metallib; do
-    [ -n "$candidate_metallib" ] || continue
-    if [ -z "$gpui_metallib" ]; then
-        gpui_metallib=$candidate_metallib
-    else
-        cmp -s "$gpui_metallib" "$candidate_metallib" || fail 'release cache contains conflicting GPUI metallibs'
-    fi
-done <<EOF
-$gpui_metallibs
-EOF
-[ -n "$gpui_metallib" ] || fail 'generated GPUI metallib is missing'
+gpui_package_id=$(cargo "+$zed_toolchain" pkgid --locked \
+    --manifest-path "$variant_checkout/Cargo.toml" -p gpui_macos)
+gpui_metallib=$(python3 scripts/select-gpui-metallib.py \
+    "$work_root/gpui-build.jsonl" "$gpui_package_id" "$gpui_binary" \
+    "$target_root/zed-adapter/release/build")
+printf 'selected current GPUI shader: %s sha256=%s\n' "$gpui_metallib" "$(hash_file "$gpui_metallib")"
 alpine_metallib=.lab/alpine/shaders/offscreen.metallib
 [ -f "$alpine_metallib" ] && [ ! -L "$alpine_metallib" ] || fail 'pinned Alpine metallib is missing'
 
@@ -258,6 +252,8 @@ memory_performed = false
 performance_qualified = false
 performance_claim = "none"
 EOF
+
+cp "$work_root/gpui-build.jsonl" "$candidate/gpui-build.jsonl"
 
 tar -cf "$candidate/physical-samplers.tar" -C "$candidate" physical-samplers
 archive_bytes=$(wc -c < "$candidate/physical-samplers.tar" | tr -d ' ')

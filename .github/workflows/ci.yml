@@ -169,6 +169,7 @@ jobs:
           path: |
             artifacts/physical-sampler-candidate/physical-samplers.tar
             artifacts/physical-sampler-candidate/physical-samplers.tar.sha256
+            artifacts/physical-sampler-candidate/gpui-build.jsonl
           retention-days: 1
           if-no-files-found: error
 
@@ -228,6 +229,7 @@ jobs:
           path: |
             artifacts/physical-sampler-published/physical-samplers.tar
             artifacts/physical-sampler-published/physical-samplers.tar.sha256
+            artifacts/physical-sampler-published/gpui-build.jsonl
             artifacts/physical-sampler-verification.log
           retention-days: 90
           if-no-files-found: error
