@@ -84,7 +84,7 @@ cargo "+$zed_toolchain" fmt \
     -- --check
 # Intentional word splitting selects one optional Cargo feature argument pair.
 # shellcheck disable=SC2086
-CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" clippy \
+CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" clippy --release \
     --manifest-path "$variant_checkout/Cargo.toml" \
     --locked \
     -p alpine_trace_adapter \
@@ -93,7 +93,7 @@ CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" cl
     -- -D warnings
 # Intentional word splitting selects one optional Cargo feature argument pair.
 # shellcheck disable=SC2086
-CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" test \
+CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" test --release \
     --manifest-path "$variant_checkout/Cargo.toml" \
     --locked \
     -p alpine_trace_adapter \
@@ -182,14 +182,14 @@ while IFS="$tab" read -r fixture_id trace_schema trace_path scene_trace_sha256 w
     fixture_dir="$output_absolute/$fixture_id"
     mkdir -p "$fixture_dir"
 
-    CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo run \
+    CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo "+$alpine_toolchain" run --release \
         --manifest-path "$repo_root/.lab/alpine/Cargo.toml" \
         --locked \
         -p alpine-assurance \
         -- render-scene-reference "$trace" "$fixture_dir/cpu-oracle.bgra" \
         > "$fixture_dir/cpu-oracle.log"
     if [ "$mode" = full ]; then
-        CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo run \
+        CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo "+$alpine_toolchain" run --release \
             --manifest-path "$repo_root/.lab/alpine/Cargo.toml" \
             --locked \
             -p alpine-assurance \
@@ -198,7 +198,7 @@ while IFS="$tab" read -r fixture_id trace_schema trace_path scene_trace_sha256 w
     fi
     # Intentional word splitting selects one optional Cargo feature argument pair.
     # shellcheck disable=SC2086
-    CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" run \
+    CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" run --release \
         --manifest-path "$variant_checkout/Cargo.toml" \
         --locked \
         -p alpine_trace_adapter \
@@ -304,7 +304,7 @@ adaptation_timing_performed = false
 renderer_timing_performed = false
 patch_series_sha256 = "$patch_series_sha256"
 shader_mode = "$shader_mode"
-adapter_build_profile = "debug"
+adapter_build_profile = "release"
 os_version = "$os_version"
 architecture = "$hardware_arch"
 alpine_rustc = "$alpine_rustc"
@@ -330,7 +330,7 @@ if [ "$shader_mode" = offline-metallib ]; then
     sampling_trace="$repo_root/.lab/alpine/$sampling_trace_path"
     sampling_dir="$output_absolute/renderer-sampling-smoke"
     mkdir -p "$sampling_dir"
-    CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" run \
+    CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" run --release \
         --manifest-path "$variant_checkout/Cargo.toml" \
         --locked \
         -p alpine_trace_adapter \
@@ -349,7 +349,7 @@ if [ "$shader_mode" = offline-metallib ]; then
         $1 != NR - 2 || $2 !~ /^[0-9]+$/ || $2 == 0 { exit 1 }
         END { if (NR != 4) exit 1 }
     ' "$sampling_dir/gpui-metal.csv" || { printf 'GPUI sampling CSV drifted\n' >&2; exit 1; }
-    CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" run \
+    CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" run --release \
         --manifest-path "$variant_checkout/Cargo.toml" \
         --locked \
         -p alpine_trace_adapter \
@@ -370,7 +370,7 @@ sequence_dir="$output_absolute/atlas-lifecycle"
 mkdir -p "$sequence_dir"
 (
     cd "$repo_root/.lab/alpine"
-    CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo run \
+    CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo "+$alpine_toolchain" run --release \
         --manifest-path Cargo.toml \
         --locked \
         -p alpine-assurance \
@@ -380,7 +380,7 @@ mkdir -p "$sequence_dir"
 if [ "$mode" = full ]; then
     (
         cd "$repo_root/.lab/alpine"
-        CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo run \
+        CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo "+$alpine_toolchain" run --release \
             --manifest-path Cargo.toml \
             --locked \
             -p alpine-assurance \
@@ -395,7 +395,7 @@ else
 fi
 # Intentional word splitting selects one optional Cargo feature argument pair.
 # shellcheck disable=SC2086
-CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" run \
+CARGO_TARGET_DIR="$repo_root/.lab/target/zed-adapter" cargo "+$zed_toolchain" run --release \
     --manifest-path "$variant_checkout/Cargo.toml" \
     --locked \
     -p alpine_trace_adapter \
@@ -482,7 +482,7 @@ EOF
         declared_workload=$(sed -nE 's/^workload_hash = "([0-9a-f]{64})"$/\1/p' "$scene")
         [ "$declared_workload" = "$workload_hash" ] || { printf 'GPUI lifecycle workload drifted at step %s\n' "$sequence" >&2; exit 1; }
         cpu_readback="$sequence_dir/step-$sequence-cpu-oracle.bgra"
-        CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo run \
+        CARGO_TARGET_DIR="$repo_root/.lab/target/alpine" cargo "+$alpine_toolchain" run --release \
             --manifest-path "$repo_root/.lab/alpine/Cargo.toml" \
             --locked \
             -p alpine-assurance \

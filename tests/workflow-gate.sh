@@ -71,7 +71,14 @@ assert_rejected sampler-not-required \
     '          test "$PHYSICAL_SAMPLER_RESULT" = success' \
     '          test "$PHYSICAL_SAMPLER_RESULT" = failure'
 assert_rejected publisher-before-ci \
-    '    needs: [ci-pass, policy, gpui-oracle-equivalence]' \
-    '    needs: [policy, gpui-oracle-equivalence]'
+    '    needs: [ci-pass, physical-sampler-bundle]' \
+    '    needs: [physical-sampler-bundle]'
+
+assert_rejected publisher-rebuild \
+    '      - name: Verify the same candidate against live aggregate ci-pass' \
+    '      - name: scripts/build-physical-sampler-bundle.sh'
+assert_rejected wrong-publication-run \
+    'workflow_run_id = "${{ github.run_id }}"' \
+    'workflow_run_id = "1"'
 
 printf 'aggregate workflow gate controls passed\n'

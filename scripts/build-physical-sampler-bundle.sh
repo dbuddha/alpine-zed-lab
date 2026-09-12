@@ -23,7 +23,10 @@ xcrun --sdk macosx --find metallib >/dev/null 2>&1 || fail 'offline metallib com
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
 lab_revision=$(git rev-parse HEAD)
-[ -z "$(git status --porcelain)" ] || fail 'lab checkout must be clean'
+if [ -n "$(git status --porcelain)" ]; then
+    git status --short >&2
+    fail 'lab checkout must be clean'
+fi
 workflow_sha=${GITHUB_SHA:-$lab_revision}
 [ "$workflow_sha" = "$lab_revision" ] || fail 'workflow source identity differs from lab checkout'
 
@@ -113,8 +116,12 @@ case "$work_root" in
     "$repo_root"/.lab/physical-sampler.*) ;;
     *) fail 'temporary worktree escaped the lab root' ;;
 esac
-variant_checkout="$work_root/zed"
-target_root="$work_root/target"
+variant_checkout="$repo_root/.lab/variants/alpine-metal"
+[ ! -e "$variant_checkout" ] && [ ! -L "$variant_checkout" ] || fail 'variant checkout already exists'
+mkdir -p "$repo_root/.lab/variants"
+# Cargo revalidates the pinned sources and flags. Share the release cache with
+# the immediately preceding oracle run; never accept a caller-supplied binary.
+target_root="$repo_root/.lab/target"
 candidate="$work_root/candidate"
 bundle="$candidate/physical-samplers"
 cleanup() {
@@ -139,19 +146,23 @@ zed_toolchain=$(sed -nE 's/^channel = "([^"]+)"$/\1/p' "$variant_checkout/rust-t
 alpine_toolchain=$(sed -nE 's/^channel = "([^"]+)"$/\1/p' .lab/alpine/rust-toolchain.toml)
 [ -n "$zed_toolchain" ] && [ -n "$alpine_toolchain" ] || fail 'pinned Rust toolchain is missing'
 
-CARGO_TARGET_DIR="$target_root/zed" cargo "+$zed_toolchain" build \
+CARGO_TARGET_DIR="$target_root/zed-adapter" cargo "+$zed_toolchain" build \
     --release --locked --manifest-path "$variant_checkout/Cargo.toml" \
-    -p alpine_trace_adapter
+    -p alpine_trace_adapter --message-format=json-render-diagnostics \
+    > "$work_root/gpui-build.jsonl"
 CARGO_TARGET_DIR="$target_root/alpine" cargo "+$alpine_toolchain" build \
     --release --locked --manifest-path .lab/alpine/Cargo.toml \
     -p alpine-assurance
 
-gpui_binary="$target_root/zed/release/alpine_trace_adapter"
+gpui_binary="$target_root/zed-adapter/release/alpine_trace_adapter"
 alpine_binary="$target_root/alpine/release/alpine-assurance"
 [ -x "$gpui_binary" ] && [ -x "$alpine_binary" ] || fail 'release sampler executable is missing'
-gpui_metallibs=$(find "$target_root/zed/release/build" -type f -path '*/out/shaders.metallib' -print)
-[ "$(printf '%s\n' "$gpui_metallibs" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || fail 'expected exactly one generated GPUI metallib'
-gpui_metallib=$gpui_metallibs
+gpui_package_id=$(cargo "+$zed_toolchain" pkgid --locked \
+    --manifest-path "$variant_checkout/Cargo.toml" -p gpui_macos)
+gpui_metallib=$(python3 scripts/select-gpui-metallib.py \
+    "$work_root/gpui-build.jsonl" "$gpui_package_id" "$gpui_binary" \
+    "$target_root/zed-adapter/release/build")
+printf 'selected current GPUI shader: %s sha256=%s\n' "$gpui_metallib" "$(hash_file "$gpui_metallib")"
 alpine_metallib=.lab/alpine/shaders/offscreen.metallib
 [ -f "$alpine_metallib" ] && [ ! -L "$alpine_metallib" ] || fail 'pinned Alpine metallib is missing'
 
@@ -241,6 +252,8 @@ memory_performed = false
 performance_qualified = false
 performance_claim = "none"
 EOF
+
+cp "$work_root/gpui-build.jsonl" "$candidate/gpui-build.jsonl"
 
 tar -cf "$candidate/physical-samplers.tar" -C "$candidate" physical-samplers
 archive_bytes=$(wc -c < "$candidate/physical-samplers.tar" | tr -d ' ')

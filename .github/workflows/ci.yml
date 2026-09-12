@@ -147,37 +147,6 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  physical-sampler-bundle:
-    name: physical-sampler-bundle
-    needs: [policy, gpui-oracle-equivalence]
-    runs-on: macos-26
-    timeout-minutes: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          repository: dbuddha/alpine-gpui
-          ref: ${{ needs.policy.outputs.alpine_commit }}
-          path: .lab/alpine
-          persist-credentials: false
-      - name: Install the optional Metal toolchain when absent
-        run: |
-          if ! xcrun --sdk macosx --find metal >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun --sdk macosx --find metal
-          xcrun --sdk macosx --find metallib
-      - name: Download exact-run GPUI oracle evidence
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        with:
-          name: gpui-oracle-${{ github.sha }}
-          path: artifacts/physical-sampler-oracle
-      - name: Provision immutable Zed source
-        run: scripts/provision-zed.sh
       - name: Build and structurally verify the candidate bundle
         env:
           ALPINE_LAB_TESTING: "1"
@@ -186,8 +155,43 @@ jobs:
         run: |
           scripts/build-physical-sampler-bundle.sh \
             artifacts/physical-sampler-candidate \
-            artifacts/physical-sampler-oracle \
+            artifacts/hosted-gpui-oracle \
             "${{ github.run_id }}"
+          scripts/verify-physical-sampler-bundle.sh \
+            artifacts/physical-sampler-candidate/physical-samplers.tar \
+            artifacts/physical-sampler-candidate/physical-samplers.tar.sha256 \
+            artifacts/physical-sampler-verified
+
+      - name: Retain the verified candidate for this run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: physical-sampler-built-${{ github.sha }}
+          path: |
+            artifacts/physical-sampler-candidate/physical-samplers.tar
+            artifacts/physical-sampler-candidate/physical-samplers.tar.sha256
+            artifacts/physical-sampler-candidate/gpui-build.jsonl
+          retention-days: 1
+          if-no-files-found: error
+
+  physical-sampler-bundle:
+    name: physical-sampler-bundle
+    needs: [policy, gpui-oracle-equivalence]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: physical-sampler-built-${{ github.sha }}
+          path: artifacts/physical-sampler-candidate
+      - name: Verify the built candidate before aggregate admission
+        env:
+          ALPINE_LAB_TESTING: "1"
+          ALPINE_BUNDLE_TEST_PLATFORM: darwin-arm64
+          ALPINE_BUNDLE_TEST_CI_PASS: success
+        run: |
           scripts/verify-physical-sampler-bundle.sh \
             artifacts/physical-sampler-candidate/physical-samplers.tar \
             artifacts/physical-sampler-candidate/physical-samplers.tar.sha256 \
@@ -196,47 +200,28 @@ jobs:
   publish-physical-sampler-bundle:
     name: publish-physical-sampler-bundle
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [ci-pass, policy, gpui-oracle-equivalence]
+    needs: [ci-pass, physical-sampler-bundle]
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 5
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          repository: dbuddha/alpine-gpui
-          ref: ${{ needs.policy.outputs.alpine_commit }}
-          path: .lab/alpine
-          persist-credentials: false
-      - name: Install the optional Metal toolchain when absent
+          name: physical-sampler-built-${{ github.sha }}
+          path: artifacts/physical-sampler-published
+      - name: Verify the same candidate against live aggregate ci-pass
         run: |
-          if ! xcrun --sdk macosx --find metal >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun --sdk macosx --find metal
-          xcrun --sdk macosx --find metallib
-      - name: Download exact-run GPUI oracle evidence
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        with:
-          name: gpui-oracle-${{ github.sha }}
-          path: artifacts/physical-sampler-oracle
-      - name: Provision immutable Zed source
-        run: scripts/provision-zed.sh
-      - name: Rebuild and verify after aggregate ci-pass
-        run: |
-          scripts/build-physical-sampler-bundle.sh \
-            artifacts/physical-sampler-published \
-            artifacts/physical-sampler-oracle \
-            "${{ github.run_id }}"
           scripts/verify-physical-sampler-bundle.sh \
             artifacts/physical-sampler-published/physical-samplers.tar \
             artifacts/physical-sampler-published/physical-samplers.tar.sha256 \
             artifacts/physical-sampler-verified \
             > artifacts/physical-sampler-verification.log
+          grep -Fx 'workflow_sha = "${{ github.sha }}"' artifacts/physical-sampler-verified/manifest.toml
+          grep -Fx 'workflow_run_id = "${{ github.run_id }}"' artifacts/physical-sampler-verified/manifest.toml
       - name: Publish exact-main physical sampler bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -244,6 +229,7 @@ jobs:
           path: |
             artifacts/physical-sampler-published/physical-samplers.tar
             artifacts/physical-sampler-published/physical-samplers.tar.sha256
+            artifacts/physical-sampler-published/gpui-build.jsonl
             artifacts/physical-sampler-verification.log
           retention-days: 90
           if-no-files-found: error

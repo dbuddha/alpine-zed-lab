@@ -106,9 +106,30 @@ physical_retention=$(awk '
     printf 'physical sampler candidates must be retained for exactly 90 days\n' >&2
     exit 1
 }
-grep -Fq '    needs: [ci-pass, policy, gpui-oracle-equivalence]' "$ci_workflow" || {
+grep -Fq '    needs: [ci-pass, physical-sampler-bundle]' "$ci_workflow" || {
     printf 'physical sampler publication must wait for aggregate ci-pass and oracle evidence\n' >&2
     exit 1
 }
+
+publisher=$(awk '/^  publish-physical-sampler-bundle:$/ { inside=1 }
+    inside && /^  ci-pass:$/ { exit } inside { print }' "$ci_workflow")
+[ "$(grep -c 'scripts/build-physical-sampler-bundle.sh' "$ci_workflow")" -eq 1 ] || {
+    echo 'CI must build the sampler exactly once' >&2; exit 1;
+}
+if printf '%s\n' "$publisher" | grep -Eq 'build-physical-sampler|provision-zed|cargo |xcodebuild'; then
+    echo 'publisher must verify the already built candidate without rebuilding' >&2; exit 1
+fi
+[ "$(grep -Fc 'name: physical-sampler-built-${{ github.sha }}' "$ci_workflow")" -eq 3 ] || {
+    echo 'builder, structural gate and publisher must share the same-run artifact' >&2; exit 1;
+}
+for expected in \
+    'scripts/verify-physical-sampler-bundle.sh' \
+    'workflow_sha = "${{ github.sha }}"' \
+    'workflow_run_id = "${{ github.run_id }}"'
+do
+    printf '%s\n' "$publisher" | grep -Fq "$expected" || {
+        echo 'publisher must verify live admission and exact source/run identity' >&2; exit 1;
+    }
+done
 
 printf 'workflow pin checks passed\n'

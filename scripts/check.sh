@@ -4,6 +4,9 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
 
+# Keep Python validation outputs out of the source checkout on every host.
+export PYTHONPYCACHEPREFIX="$repo_root/.lab/python-cache"
+
 for script in scripts/*.sh scripts/lib/*.sh tests/*.sh; do
     sh -n "$script"
 done
