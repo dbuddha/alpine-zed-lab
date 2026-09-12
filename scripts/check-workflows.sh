@@ -36,6 +36,24 @@ gpui_retention=$(awk '
 }
 
 ci_workflow="$workflow_root/ci.yml"
+# Ordinary PRs must not opt into exhaustive assurance or rerun for metadata edits.
+grep -Fq '    types: [opened, synchronize, reopened]' "$ci_workflow" || {
+    echo 'code CI must use source-event PR triggers' >&2; exit 1;
+}
+if grep -q '^  schedule:' "$ci_workflow"; then
+    echo 'lab qualification must not run on a recurring schedule' >&2; exit 1
+fi
+for mode in coverage mutation; do
+    upper=$(printf '%s' "$mode" | tr '[:lower:]' '[:upper:]')
+    expected="          ALPINE_ZED_$upper: \${{ github.event_name == 'workflow_dispatch' && inputs.$mode && '1' || '0' }}"
+    grep -Fxq "$expected" "$ci_workflow" || {
+        printf '%s must require an explicit manual input\n' "$mode" >&2; exit 1;
+    }
+    expected="        if: github.event_name == 'workflow_dispatch' && inputs.$mode"
+    grep -Fxq "$expected" "$ci_workflow" || {
+        printf '%s tool installation must be opt-in\n' "$mode" >&2; exit 1;
+    }
+done
 ci_pass_block=$(awk '
     /^  ci-pass:$/ { inside = 1 }
     inside && /^  [A-Za-z0-9_-]+:$/ && $0 != "  ci-pass:" { exit }

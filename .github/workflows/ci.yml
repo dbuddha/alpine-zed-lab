@@ -2,11 +2,19 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
-  schedule:
-    - cron: "23 7 * * 1"
   workflow_dispatch:
+    inputs:
+      coverage:
+        description: Run adapter coverage for a concrete investigation
+        type: boolean
+        default: false
+      mutation:
+        description: Run exhaustive adapter mutation for a concrete investigation
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -116,14 +124,16 @@ jobs:
           fi
           xcrun --sdk macosx --find metal
           xcrun --sdk macosx --find metallib
-      - name: Install pinned source-assurance tools
-        run: |
-          cargo install --locked cargo-llvm-cov --version 0.8.7
-          cargo install --locked cargo-mutants --version 27.1.0
+      - name: Install requested coverage tool
+        if: github.event_name == 'workflow_dispatch' && inputs.coverage
+        run: cargo install --locked cargo-llvm-cov --version 0.8.7
+      - name: Install requested mutation tool
+        if: github.event_name == 'workflow_dispatch' && inputs.mutation
+        run: cargo install --locked cargo-mutants --version 27.1.0
       - name: Provision pinned Zed and validate the GPL adapter
         env:
-          ALPINE_ZED_COVERAGE: "1"
-          ALPINE_ZED_MUTATION: "1"
+          ALPINE_ZED_COVERAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.coverage && '1' || '0' }}
+          ALPINE_ZED_MUTATION: ${{ github.event_name == 'workflow_dispatch' && inputs.mutation && '1' || '0' }}
         run: |
           scripts/provision-zed.sh
           scripts/check.sh

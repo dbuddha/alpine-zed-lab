@@ -20,8 +20,8 @@ and independently decodes version 2 clips, quads, one prepared A8 atlas,
 monochrome glyphs, and two-step scroll and resize identities into GPUI scenes.
 It uploads canonical atlas bytes through GPUI's existing atlas and uses an
 explicit test-support clear color, so it performs no font shaping or
-rasterization and adds no synthetic background draw. Pull requests and the
-weekly schedule run coverage ratchets and exhaustive adapter mutation testing.
+rasterization and adds no synthetic background draw. Ordinary pull requests run correctness checks. Coverage and exhaustive adapter
+mutation are optional manual inputs; there is no recurring qualification run.
 Renderer-only timing and memory remain disabled until semantic equivalence,
 offline-shader CI, and hardware calibration qualify them.
 
@@ -62,6 +62,20 @@ flowchart LR
 - Raw runs live in ignored `artifacts/` storage.
 - Only exact findings, protocol records, and accepted evidence cross into Alpine.
 - Zed source, Zed assets, and GPL-derived patches never enter Alpine GPUI.
+
+## Development scope
+
+Work is PR-first: a user request or issue supplies scope, and issues are needed
+for deferred defects, blockers or work spanning PRs. Parent relationships, labels,
+research packages and Projects are optional. See `AGENTS.md` for source isolation
+and acceptance. Keep Alpine's macOS capability probe separate from historical
+qualification: the existing prepared-atlas adapter does not measure text shaping,
+SwiftUI or AppKit, and it cannot prove complete product superiority.
+
+The lean workflow preserves native oracle and aggregate failure checks. Its hosted
+duration after removing mandatory assurance still needs measurement; a timeout
+setting is not proof of a sub-15-minute run. Physical sampler construction remains
+separate from physical performance acceptance.
 
 ## Verification
 
