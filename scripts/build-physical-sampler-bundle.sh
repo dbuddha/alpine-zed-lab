@@ -23,7 +23,10 @@ xcrun --sdk macosx --find metallib >/dev/null 2>&1 || fail 'offline metallib com
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
 lab_revision=$(git rev-parse HEAD)
-[ -z "$(git status --porcelain)" ] || fail 'lab checkout must be clean'
+if [ -n "$(git status --porcelain)" ]; then
+    git status --short >&2
+    fail 'lab checkout must be clean'
+fi
 workflow_sha=${GITHUB_SHA:-$lab_revision}
 [ "$workflow_sha" = "$lab_revision" ] || fail 'workflow source identity differs from lab checkout'
 
